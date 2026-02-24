@@ -1,4 +1,4 @@
-const CACHE = 'timeflow-v8';
+const CACHE = 'timeflow-v11';
 const ASSETS = [
   './',
   './index.html',
