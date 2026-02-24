@@ -38,19 +38,149 @@ button:active{opacity:.7;transform:scale(.97)}button{transition:all .15s}
 <div id="root"></div>
 <script>
 // ═══════════════════════════════════════════════════════════════
-// IndexedDB Local Storage Layer
+// Encrypted IndexedDB Storage Layer (AES-256-GCM)
 // ═══════════════════════════════════════════════════════════════
 const DB_NAME='timeflow';const DB_VER=3;
 const STORES=['categories','goals','entries','habit_logs','tracking_entries','settings','life_values','budgets','budget_categories','budget_entries','lessons','fitness_plans','fitness_days','fitness_exercises','fitness_sessions','session_sets','fitness_goals','weight_logs'];
 let _db=null;
+let _cryptoKey=null; // AES key derived from password, lives only in memory
+
+// --- Crypto helpers (Web Crypto API, no external libs) ---
+const SALT_KEY='tf_salt';const VERIFY_KEY='tf_verify';
+function getSalt(){let s=localStorage.getItem(SALT_KEY);if(!s){const arr=new Uint8Array(16);crypto.getRandomValues(arr);s=btoa(String.fromCharCode(...arr));localStorage.setItem(SALT_KEY,s)}return Uint8Array.from(atob(s),c=>c.charCodeAt(0))}
+async function deriveKey(password){
+  const enc=new TextEncoder().encode(password);
+  const keyMaterial=await crypto.subtle.importKey('raw',enc,'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt:getSalt(),iterations:100000,hash:'SHA-256'},keyMaterial,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+}
+async function encrypt(data){
+  if(!_cryptoKey)return data; // fallback: no encryption if no key
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const encoded=new TextEncoder().encode(JSON.stringify(data));
+  const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv},_cryptoKey,encoded);
+  return{_enc:btoa(String.fromCharCode(...new Uint8Array(encrypted))),_iv:btoa(String.fromCharCode(...iv))}
+}
+async function decrypt(record){
+  if(!record||!record._enc||!_cryptoKey)return record;
+  try{
+    const iv=Uint8Array.from(atob(record._iv),c=>c.charCodeAt(0));
+    const data=Uint8Array.from(atob(record._enc),c=>c.charCodeAt(0));
+    const decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},_cryptoKey,data);
+    const obj=JSON.parse(new TextDecoder().decode(decrypted));
+    obj.id=record.id;return obj;
+  }catch(e){console.error('Decrypt error:',e);return null}
+}
+// Verify password: encrypt a known string, store it. On login, try to decrypt it.
+async function setVerification(){
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const encoded=new TextEncoder().encode('timeflow_ok');
+  const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv},_cryptoKey,encoded);
+  localStorage.setItem(VERIFY_KEY,JSON.stringify({d:btoa(String.fromCharCode(...new Uint8Array(encrypted))),v:btoa(String.fromCharCode(...iv))}));
+}
+async function checkPassword(password){
+  _cryptoKey=await deriveKey(password);
+  const stored=localStorage.getItem(VERIFY_KEY);
+  if(!stored){await setVerification();return true} // first time = set password
+  try{
+    const{d,v}=JSON.parse(stored);
+    const iv=Uint8Array.from(atob(v),c=>c.charCodeAt(0));
+    const data=Uint8Array.from(atob(d),c=>c.charCodeAt(0));
+    const decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},_cryptoKey,data);
+    const text=new TextDecoder().decode(decrypted);
+    if(text==='timeflow_ok')return true;
+    _cryptoKey=null;return false;
+  }catch(e){_cryptoKey=null;return false}
+}
+function isFirstTime(){return !localStorage.getItem(VERIFY_KEY)}
+function isUnlocked(){return _cryptoKey!==null}
+
+// --- IndexedDB ---
 function openDB(){return new Promise((res,rej)=>{if(_db)return res(_db);const r=indexedDB.open(DB_NAME,DB_VER);r.onupgradeneeded=e=>{const db=e.target.result;STORES.forEach(s=>{if(!db.objectStoreNames.contains(s))db.createObjectStore(s,{keyPath:'id',autoIncrement:true})})};r.onsuccess=e=>{_db=e.target.result;res(_db)};r.onerror=e=>rej(e)})}
-async function dbAll(store){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readonly');const s=tx.objectStore(store);const r=s.getAll();r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)})}
-async function dbGet(store,id){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readonly');const r=tx.objectStore(store).get(Number(id));r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)})}
-async function dbAdd(store,obj){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite');const r=tx.objectStore(store).add(obj);r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)})}
-async function dbPut(store,obj){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite');const r=tx.objectStore(store).put(obj);r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)})}
+
+async function dbAll(store){
+  const db=await openDB();
+  const raw=await new Promise((res,rej)=>{const tx=db.transaction(store,'readonly');const r=tx.objectStore(store).getAll();r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)});
+  const results=await Promise.all(raw.map(r=>decrypt(r)));
+  return results.filter(Boolean);
+}
+async function dbGet(store,id){
+  const db=await openDB();
+  const raw=await new Promise((res,rej)=>{const tx=db.transaction(store,'readonly');const r=tx.objectStore(store).get(Number(id));r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)});
+  return raw?await decrypt(raw):null;
+}
+async function dbAdd(store,obj){
+  const db=await openDB();
+  const enc=await encrypt(obj);
+  return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite');const r=tx.objectStore(store).add(enc);r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)});
+}
+async function dbPut(store,obj){
+  const db=await openDB();
+  const id=obj.id;const enc=await encrypt(obj);enc.id=id;
+  return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite');const r=tx.objectStore(store).put(enc);r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)});
+}
 async function dbDel(store,id){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite');const r=tx.objectStore(store).delete(Number(id));r.onsuccess=()=>res();r.onerror=e=>rej(e)})}
 const today=()=>new Date().toISOString().slice(0,10);
 const nextId=(arr)=>arr.length?Math.max(...arr.map(x=>x.id||0))+1:1;
+
+// --- Auto-Backup: encrypted snapshot in localStorage ---
+const BACKUP_KEY='tf_backup';const BACKUP_TS_KEY='tf_backup_ts';
+async function createBackup(){
+  if(!_cryptoKey)return;
+  try{
+    const data={};
+    for(const store of STORES){data[store]=await dbAll(store)}
+    const json=JSON.stringify(data);
+    const iv=crypto.getRandomValues(new Uint8Array(12));
+    const encoded=new TextEncoder().encode(json);
+    const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv},_cryptoKey,encoded);
+    const payload=JSON.stringify({
+      d:btoa(String.fromCharCode(...new Uint8Array(encrypted))),
+      v:btoa(String.fromCharCode(...iv)),
+      t:new Date().toISOString(),
+      n:Object.values(data).reduce((s,a)=>s+a.length,0)
+    });
+    localStorage.setItem(BACKUP_KEY,payload);
+    localStorage.setItem(BACKUP_TS_KEY,new Date().toISOString());
+    console.log('Backup created:',new Date().toLocaleTimeString());
+    return true;
+  }catch(e){console.error('Backup error:',e);return false}
+}
+async function restoreFromBackup(){
+  if(!_cryptoKey)return false;
+  const raw=localStorage.getItem(BACKUP_KEY);
+  if(!raw)return false;
+  try{
+    const{d,v}=JSON.parse(raw);
+    const iv=Uint8Array.from(atob(v),c=>c.charCodeAt(0));
+    const enc=Uint8Array.from(atob(d),c=>c.charCodeAt(0));
+    const decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},_cryptoKey,enc);
+    const data=JSON.parse(new TextDecoder().decode(decrypted));
+    const db=await openDB();
+    for(const store of Object.keys(data)){
+      if(!db.objectStoreNames.contains(store))continue;
+      const items=data[store];if(!items||!items.length)continue;
+      const tx=db.transaction(store,'readwrite');const s=tx.objectStore(store);
+      for(const item of items){
+        const enc=await encrypt(item);enc.id=item.id;
+        try{s.put(enc)}catch(e){}
+      }
+      await new Promise(r=>{tx.oncomplete=r});
+    }
+    console.log('Restored from backup');
+    return true;
+  }catch(e){console.error('Restore error:',e);return false}
+}
+async function hasData(){
+  const db=await openDB();
+  const tx=db.transaction('categories','readonly');
+  const count=await new Promise(r=>{const req=tx.objectStore('categories').count();req.onsuccess=()=>r(req.result)});
+  return count>0;
+}
+function getBackupInfo(){
+  const raw=localStorage.getItem(BACKUP_KEY);
+  if(!raw)return null;
+  try{const{t,n}=JSON.parse(raw);return{timestamp:t,records:n}}catch(e){return null}
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Local API - replaces server calls
@@ -231,6 +361,8 @@ function useDrag(items,onReorder){
 const DragHandle=({onDS,idx})=><div draggable onDragStart={e=>onDS(e,idx)} style={{cursor:"grab",padding:"4px 6px",color:T.textMuted,fontSize:18,lineHeight:1,userSelect:"none",touchAction:"none"}} title="Verschieben">{"\u2261"}</div>;
 
 function Sidebar({tab,setTab,user,onLogout,isMobile,isOpen,setIsOpen,onExport,onImport}){
+  const[bkInfo,setBK]=useState(null);
+  useEffect(()=>{setBK(getBackupInfo());const iv=setInterval(()=>setBK(getBackupInfo()),30000);return()=>clearInterval(iv)},[]);
   const items=[
     {k:"dash",icon:"\u{1F4CB}",label:"Dashboard",color:"#e8553a"},
     {k:"erfassung",icon:"\u23F1",label:"Erfassung",color:T.blue},
@@ -255,9 +387,12 @@ function Sidebar({tab,setTab,user,onLogout,isMobile,isOpen,setIsOpen,onExport,on
           <span style={{fontSize:24,lineHeight:1}}>{it.icon}</span><span>{it.label}</span>{a&&<div style={{marginLeft:"auto",width:4,height:20,borderRadius:2,background:it.color}}/>}
         </button>})}
       </div>
-      <div style={{padding:"16px 12px",borderTop:"1px solid "+T.border,display:"flex",flexDirection:"column",gap:4}}>
-        {onExport&&<button onClick={onExport} style={{display:"flex",alignItems:"center",gap:14,padding:"10px 16px",border:"none",borderRadius:12,cursor:"pointer",fontFamily:"inherit",background:"transparent",color:T.textMuted,fontSize:13,width:"100%",textAlign:"left"}}><span style={{fontSize:20}}>{"\u{1F4BE}"}</span><span>Backup</span></button>}
-        {onImport&&<button onClick={onImport} style={{display:"flex",alignItems:"center",gap:14,padding:"10px 16px",border:"none",borderRadius:12,cursor:"pointer",fontFamily:"inherit",background:"transparent",color:T.textMuted,fontSize:13,width:"100%",textAlign:"left"}}><span style={{fontSize:20}}>{"\u{1F4E5}"}</span><span>Import</span></button>}
+      <div style={{padding:"12px 12px",borderTop:"1px solid "+T.border,display:"flex",flexDirection:"column",gap:4}}>
+        {bkInfo&&<div style={{padding:"4px 14px",fontSize:10,color:T.green}}>
+          {"\u2705"} Backup: {new Date(bkInfo.timestamp).toLocaleString('de-CH',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})} ({bkInfo.records} Einträge)
+        </div>}
+        {onExport&&<button onClick={()=>{onExport();setTimeout(()=>setBK(getBackupInfo()),1000)}} style={{display:"flex",alignItems:"center",gap:14,padding:"8px 14px",border:"none",borderRadius:12,cursor:"pointer",fontFamily:"inherit",background:"transparent",color:T.textMuted,fontSize:12,width:"100%",textAlign:"left"}}><span style={{fontSize:18}}>{"\u{1F4BE}"}</span><span>In Dateien speichern</span></button>}
+        {onImport&&<button onClick={onImport} style={{display:"flex",alignItems:"center",gap:14,padding:"8px 14px",border:"none",borderRadius:12,cursor:"pointer",fontFamily:"inherit",background:"transparent",color:T.textMuted,fontSize:12,width:"100%",textAlign:"left"}}><span style={{fontSize:18}}>{"\u{1F4E5}"}</span><span>Aus Datei laden</span></button>}
       </div>
     </div></>
 }
@@ -1805,8 +1940,45 @@ function EntryModal({open,onClose,onSave,categories,labels,edit}){
   </div></Modal>
 }
 
+/* ============ LOCK SCREEN ============ */
+function LockScreen({onUnlock}){
+  const[pw,setPW]=useState("");const[pw2,setPW2]=useState("");const[err,setErr]=useState("");const[loading,setL]=useState(false);
+  const first=isFirstTime();
+  const submit=async()=>{
+    setErr("");setL(true);
+    if(first){
+      if(pw.length<4){setErr("Mindestens 4 Zeichen");setL(false);return}
+      if(pw!==pw2){setErr("Passwörter stimmen nicht überein");setL(false);return}
+      const ok=await checkPassword(pw);
+      if(ok)onUnlock();else{setErr("Fehler");setL(false)}
+    }else{
+      const ok=await checkPassword(pw);
+      if(ok)onUnlock();else{setErr("Falsches Passwort");setL(false);setPW("")}
+    }
+  };
+  return<div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.bg,padding:24}}>
+    <div style={{...S.card,maxWidth:360,width:"100%",textAlign:"center"}}>
+      <div style={{fontSize:48,marginBottom:16}}>{"\u{1F512}"}</div>
+      <h2 style={{fontSize:20,fontWeight:700,marginBottom:4}}>TimeFlow</h2>
+      <div style={{fontSize:13,color:T.textSec,marginBottom:24}}>{first?"Setze ein Passwort für deine Daten":"Passwort eingeben"}</div>
+      <div style={{marginBottom:12}}>
+        <input type="password" style={{...S.inp,textAlign:"center",fontSize:20,letterSpacing:4}} placeholder={first?"Neues Passwort":"Passwort"} value={pw} onChange={e=>setPW(e.target.value)} onKeyDown={e=>e.key==='Enter'&&(!first?submit():null)} autoFocus/>
+      </div>
+      {first&&<div style={{marginBottom:12}}>
+        <input type="password" style={{...S.inp,textAlign:"center",fontSize:20,letterSpacing:4}} placeholder="Wiederholen" value={pw2} onChange={e=>setPW2(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()}/>
+      </div>}
+      {err&&<div style={{color:T.accent,fontSize:13,marginBottom:12}}>{err}</div>}
+      <button onClick={submit} disabled={loading} style={{...S.btn(T.green),width:"100%",opacity:loading?.5:1}}>{loading?"...":first?"Passwort setzen":"\u{1F513} Entsperren"}</button>
+      {first&&<div style={{fontSize:11,color:T.textMuted,marginTop:16}}>
+        {"\u{1F512}"} Alle Daten werden mit AES-256 verschlüsselt.<br/>Dein Passwort wird nirgendwo gespeichert.
+      </div>}
+    </div>
+  </div>
+}
+
 /* ============ APP (Local - No Login) ============ */
 function App(){
+  const[unlocked,setUnlocked]=useState(false);
   const[tab,setTab]=useState("dash");
   const[categories,setCats]=useState([]);const[goals,setGoals]=useState([]);const[entries,setEntries]=useState([]);const[labels,setLabels]=useState([]);
   const[catStats,setCS]=useState([]);const[weekData,setWD]=useState([]);const[loaded,setLoaded]=useState(false);
@@ -1817,7 +1989,33 @@ function App(){
   useEffect(()=>{const h=()=>setIsMobile(window.innerWidth<768);window.addEventListener('resize',h);return()=>window.removeEventListener('resize',h)},[]);
 
   const loadData=async()=>{try{const[c,g,e,s,lb]=await Promise.all([api.get('categories'),api.get('goals'),api.get('entries'),api.get('stats'),api.get('labels')]);setCats(Array.isArray(c)?c:[]);setGoals(Array.isArray(g)?g:[]);setEntries(Array.isArray(e)?e:[]);setCS(s.catStats||[]);setWD(s.weekData||[]);setLabels(Array.isArray(lb)?lb:[]);setLoaded(true)}catch(e){console.error(e);setLoaded(true)}};
-  useEffect(()=>{openDB().then(()=>loadData())},[]);
+
+  // On unlock: open DB, check if data exists, restore from backup if needed, then load
+  useEffect(()=>{if(!unlocked)return;
+    (async()=>{
+      await openDB();
+      const has=await hasData();
+      if(!has){
+        const bi=getBackupInfo();
+        if(bi){
+          console.log('No data in DB, restoring backup from',bi.timestamp,'with',bi.records,'records');
+          await restoreFromBackup();
+        }
+      }
+      loadData();
+    })();
+  },[unlocked]);
+
+  // Auto-backup when app goes to background or closes
+  useEffect(()=>{if(!unlocked)return;
+    const doBackup=()=>{if(document.visibilityState==='hidden')createBackup()};
+    document.addEventListener('visibilitychange',doBackup);
+    window.addEventListener('pagehide',()=>createBackup());
+    // Also backup every 5 min while active
+    const iv=setInterval(()=>createBackup(),5*60*1000);
+    return()=>{document.removeEventListener('visibilitychange',doBackup);clearInterval(iv)};
+  },[unlocked]);
+
   useEffect(()=>{const h=()=>loadData();window.addEventListener('tf-reload',h);return()=>window.removeEventListener('tf-reload',h)},[]);
 
   const catColor=id=>{const i=categories.findIndex(c=>c.id==id);return T.colors[i>=0?i%T.colors.length:0]};
@@ -1831,37 +2029,58 @@ function App(){
   const saveEntry=async d=>{if(d.id)await api.put('entries/'+d.id,d);else await api.post('entries',d);setSEM(false);setEE(null);loadData()};
   const delEntry=async id=>{await api.del('entries/'+id);loadData()};
 
-  // Export all data as JSON
+  // Export all data as encrypted file
   const exportData=async()=>{
     const data={};
-    for(const store of ['categories','goals','entries','habit_logs','tracking_entries','settings','life_values','budgets','budget_categories','budget_entries','lessons','fitness_plans','fitness_days','fitness_exercises','fitness_sessions','session_sets','fitness_goals','weight_logs']){
-      data[store]=await dbAll(store);
-    }
-    const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
-    const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='timeflow-backup-'+new Date().toISOString().slice(0,10)+'.json';a.click();URL.revokeObjectURL(url);
+    for(const store of STORES){data[store]=await dbAll(store)}
+    // Encrypt the whole backup with user's key
+    const json=JSON.stringify(data);
+    const iv=crypto.getRandomValues(new Uint8Array(12));
+    const encoded=new TextEncoder().encode(json);
+    const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv},_cryptoKey,encoded);
+    const payload=JSON.stringify({d:btoa(String.fromCharCode(...new Uint8Array(encrypted))),v:btoa(String.fromCharCode(...iv)),t:new Date().toISOString()});
+    const blob=new Blob([payload],{type:'application/json'});
+    const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='timeflow-backup-'+new Date().toISOString().slice(0,10)+'.tfb';a.click();URL.revokeObjectURL(url);
+    await createBackup();
   };
-  // Import from JSON
+  // Import from encrypted file
   const importData=async()=>{
-    const input=document.createElement('input');input.type='file';input.accept='.json';
+    const input=document.createElement('input');input.type='file';input.accept='.tfb,.json';
     input.onchange=async e=>{
       const file=e.target.files[0];if(!file)return;
       if(!confirm('Alle bestehenden Daten werden überschrieben. Fortfahren?'))return;
-      const text=await file.text();const data=JSON.parse(text);
+      const text=await file.text();
+      let data;
+      try{
+        const parsed=JSON.parse(text);
+        if(parsed.d&&parsed.v){
+          // Encrypted .tfb file
+          const iv=Uint8Array.from(atob(parsed.v),c=>c.charCodeAt(0));
+          const enc=Uint8Array.from(atob(parsed.d),c=>c.charCodeAt(0));
+          const decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},_cryptoKey,enc);
+          data=JSON.parse(new TextDecoder().decode(decrypted));
+        }else{
+          // Legacy unencrypted JSON
+          data=parsed;
+        }
+      }catch(err){alert('Entschlüsselung fehlgeschlagen. Falsches Passwort oder beschädigte Datei.');return}
       const db=await openDB();
       for(const store of Object.keys(data)){
         if(!db.objectStoreNames.contains(store))continue;
         const tx=db.transaction(store,'readwrite');const s=tx.objectStore(store);
         await new Promise(r=>{s.clear().onsuccess=r});
         for(const item of data[store]){
-          try{s.add(item)}catch(e){}
+          const enc=await encrypt(item);enc.id=item.id;
+          try{s.put(enc)}catch(e){}
         }
         await new Promise(r=>{tx.oncomplete=r});
       }
-      loadData();alert('Import erfolgreich!');
+      loadData();await createBackup();alert('Import erfolgreich!');
     };
     input.click();
   };
 
+  if(!unlocked)return<LockScreen onUnlock={()=>setUnlocked(true)}/>;
   if(!loaded)return<div style={{background:T.bg,height:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{color:T.textSec}}>Laden...</div></div>;
 
   const sh={isMobile,setMenuOpen};
