@@ -250,8 +250,8 @@ function Sidebar({tab,setTab,user,onLogout,isMobile,isOpen,setIsOpen,onExport,on
   return<>{isMobile&&isOpen&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:998}} onClick={()=>setIsOpen(false)}/>}
     <div style={sty}>
       <div style={{padding:"24px 20px 20px"}}><h1 style={{fontSize:22,fontWeight:700,margin:0,fontFamily:"'JetBrains Mono',monospace",background:"linear-gradient(135deg,"+T.accent+","+T.orange+")",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>TimeFlow</h1><div style={{fontSize:12,color:T.textMuted,marginTop:4}}>{"\u{1F4F1}"} Lokal</div></div>
-      <div style={{flex:1,padding:"8px 12px",display:"flex",flexDirection:"column",gap:4}}>
-        {items.map(it=>{const a=tab===it.k;return<button key={it.k} onClick={()=>{setTab(it.k);if(isMobile)setIsOpen(false)}} style={{display:"flex",alignItems:"center",gap:14,padding:"14px 16px",border:"none",borderRadius:12,cursor:"pointer",fontFamily:"inherit",background:a?T.card:"transparent",color:a?T.text:T.textSec,fontSize:15,fontWeight:a?700:500,textAlign:"left",width:"100%"}}>
+      <div style={{flex:1,padding:"8px 12px",display:"flex",flexDirection:"column",gap:4,overflowY:"auto",WebkitOverflowScrolling:"touch"}}>
+        {items.map(it=>{const a=tab===it.k;return<button key={it.k} onClick={()=>{setTab(it.k);if(isMobile)setIsOpen(false)}} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 14px",border:"none",borderRadius:12,cursor:"pointer",fontFamily:"inherit",background:a?T.card:"transparent",color:a?T.text:T.textSec,fontSize:14,fontWeight:a?700:500,textAlign:"left",width:"100%",flexShrink:0}}>
           <span style={{fontSize:24,lineHeight:1}}>{it.icon}</span><span>{it.label}</span>{a&&<div style={{marginLeft:"auto",width:4,height:20,borderRadius:2,background:it.color}}/>}
         </button>})}
       </div>
