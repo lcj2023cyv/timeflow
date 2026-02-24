@@ -1,0 +1,1892 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TimeFlow">
+<meta name="theme-color" content="#0d1117">
+<link rel="apple-touch-icon" sizes="180x180" href="./icon-180.png">
+<link rel="manifest" href="./manifest.json">
+<title>TimeFlow</title>
+<script>
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>{
+    navigator.serviceWorker.register('./sw.js')
+      .then(r=>console.log('SW ready',r.scope))
+      .catch(e=>console.log('SW fail',e));
+  });
+}
+</script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body,#root{height:100%;width:100%;overflow:hidden}
+body{background:#0d1117;color:#f0f6fc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:16px;-webkit-font-smoothing:antialiased;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#0d1117}::-webkit-scrollbar-thumb{background:#21262d;border-radius:2px}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+input:focus,textarea:focus,select:focus{border-color:#e8553a!important;outline:none}
+button:active{opacity:.7;transform:scale(.97)}button{transition:all .15s}
+</style>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script>
+// ═══════════════════════════════════════════════════════════════
+// IndexedDB Local Storage Layer
+// ═══════════════════════════════════════════════════════════════
+const DB_NAME='timeflow';const DB_VER=3;
+const STORES=['categories','goals','entries','habit_logs','tracking_entries','settings','life_values','budgets','budget_categories','budget_entries','lessons','fitness_plans','fitness_days','fitness_exercises','fitness_sessions','session_sets','fitness_goals','weight_logs'];
+let _db=null;
+function openDB(){return new Promise((res,rej)=>{if(_db)return res(_db);const r=indexedDB.open(DB_NAME,DB_VER);r.onupgradeneeded=e=>{const db=e.target.result;STORES.forEach(s=>{if(!db.objectStoreNames.contains(s))db.createObjectStore(s,{keyPath:'id',autoIncrement:true})})};r.onsuccess=e=>{_db=e.target.result;res(_db)};r.onerror=e=>rej(e)})}
+async function dbAll(store){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readonly');const s=tx.objectStore(store);const r=s.getAll();r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)})}
+async function dbGet(store,id){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readonly');const r=tx.objectStore(store).get(Number(id));r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)})}
+async function dbAdd(store,obj){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite');const r=tx.objectStore(store).add(obj);r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)})}
+async function dbPut(store,obj){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite');const r=tx.objectStore(store).put(obj);r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)})}
+async function dbDel(store,id){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite');const r=tx.objectStore(store).delete(Number(id));r.onsuccess=()=>res();r.onerror=e=>rej(e)})}
+const today=()=>new Date().toISOString().slice(0,10);
+const nextId=(arr)=>arr.length?Math.max(...arr.map(x=>x.id||0))+1:1;
+
+// ═══════════════════════════════════════════════════════════════
+// Local API - replaces server calls
+// ═══════════════════════════════════════════════════════════════
+const localHandlers={};
+// --- Categories ---
+localHandlers['GET categories']=async()=>{const c=await dbAll('categories');return c.sort((a,b)=>(a.sort_order||0)-(b.sort_order||0))};
+localHandlers['POST categories']=async(d)=>{const all=await dbAll('categories');const o={name:d.name,description:d.description||'',sort_order:all.length,created_at:new Date().toISOString()};const id=await dbAdd('categories',{...o,id:undefined});return{id,name:d.name}};
+localHandlers['PUT categories/:id']=async(d,id)=>{const c=await dbGet('categories',id);if(c){c.name=d.name;c.description=d.description||'';await dbPut('categories',c)}return{status:'ok'}};
+localHandlers['DELETE categories/:id']=async(_,id)=>{id=Number(id);const entries=await dbAll('entries');for(const e of entries)if(e.category_id==id)await dbDel('entries',e.id);const goals=await dbAll('goals');for(const g of goals)if(g.category_id==id)await dbDel('goals',g.id);await dbDel('categories',id);return{status:'ok'}};
+// --- Reorder ---
+localHandlers['POST reorder']=async(d)=>{const store=d.table==='categories'?'categories':d.table==='goals'?'goals':d.table==='lessons_learned'?'lessons':d.table;const ids=d.ids||[];for(let i=0;i<ids.length;i++){const obj=await dbGet(store,ids[i]);if(obj){obj.sort_order=i;await dbPut(store,obj)}}return{status:'ok'}};
+// --- Goals ---
+localHandlers['GET goals']=async()=>{const g=await dbAll('goals');return g.sort((a,b)=>(a.sort_order||0)-(b.sort_order||0)).map(g=>({...g,smart:{specific:g.smart_specific||'',measurable:g.smart_measurable||'',achievable:g.smart_achievable||'',relevant:g.smart_relevant||'',timeBound:g.smart_timebound||''}}))};
+localHandlers['POST goals']=async(d)=>{const sm=d.smart||{};const all=await dbAll('goals');const o={category_id:Number(d.categoryId),title:d.title,goal_type:d.goalType||'habit',frequency:d.frequency||'once',target_per_period:d.targetPerPeriod||null,deadline:d.deadline||null,target_minutes:d.targetMinutes||0,progress:0,tracking_unit:d.trackingUnit||'',tracking_target:d.trackingTarget||null,tracking_direction:d.trackingDirection||'down',smart_specific:sm.specific||'',smart_measurable:sm.measurable||'',smart_achievable:sm.achievable||'',smart_relevant:sm.relevant||'',smart_timebound:sm.timeBound||'',sort_order:all.length,created_at:new Date().toISOString()};const id=await dbAdd('goals',{...o,id:undefined});return{id,status:'ok'}};
+localHandlers['PUT goals/:id']=async(d,id)=>{const g=await dbGet('goals',id);if(!g)return{status:'ok'};const sm=d.smart||{};Object.assign(g,{title:d.title,category_id:Number(d.categoryId),goal_type:d.goalType||'habit',frequency:d.frequency||'once',target_per_period:d.targetPerPeriod||null,deadline:d.deadline||null,target_minutes:d.targetMinutes||0,progress:d.progress||g.progress||0,tracking_unit:d.trackingUnit||'',tracking_target:d.trackingTarget||null,tracking_direction:d.trackingDirection||'down',smart_specific:sm.specific||'',smart_measurable:sm.measurable||'',smart_achievable:sm.achievable||'',smart_relevant:sm.relevant||'',smart_timebound:sm.timeBound||''});await dbPut('goals',g);return{status:'ok'}};
+localHandlers['POST goals/:id/toggle']=async(_,id)=>{const g=await dbGet('goals',id);if(g){g.progress=g.progress>=100?0:100;await dbPut('goals',g)}return{status:'ok'}};
+localHandlers['DELETE goals/:id']=async(_,id)=>{await dbDel('goals',Number(id));return{status:'ok'}};
+// --- Entries ---
+localHandlers['GET entries']=async()=>{const e=await dbAll('entries');return e.sort((a,b)=>b.entry_date.localeCompare(a.entry_date)||(b.created_at||'').localeCompare(a.created_at||''))};
+localHandlers['POST entries']=async(d)=>{const date=d.entryDate||today();const endDate=d.endDate||date;let mins=d.minutes||0;if(d.startTime&&d.endTime&&!mins){const s=new Date(date+'T'+d.startTime);const e=new Date(endDate+'T'+d.endTime);if(e>s)mins=Math.round((e-s)/60000)}const o={category_id:Number(d.categoryId),goal_id:d.goalId?Number(d.goalId):null,label:d.label||'',minutes:Math.round(mins),start_time:d.startTime||null,end_time:d.endTime||null,note:d.note||'',entry_date:date,end_date:endDate!==date?endDate:null,created_at:new Date().toISOString()};const id=await dbAdd('entries',{...o,id:undefined});return{id,status:'ok'}};
+localHandlers['PUT entries/:id']=async(d,id)=>{const e=await dbGet('entries',id);if(!e)return{status:'ok'};const date=d.entryDate||today();const endDate=d.endDate||date;let mins=d.minutes||0;if(d.startTime&&d.endTime&&!mins){const s=new Date(date+'T'+d.startTime);const en=new Date(endDate+'T'+d.endTime);if(en>s)mins=Math.round((en-s)/60000)}Object.assign(e,{category_id:Number(d.categoryId),goal_id:d.goalId?Number(d.goalId):null,label:d.label||'',minutes:Math.round(mins),start_time:d.startTime||null,end_time:d.endTime||null,note:d.note||'',entry_date:date,end_date:endDate!==date?endDate:null});await dbPut('entries',e);return{status:'ok'}};
+localHandlers['DELETE entries/:id']=async(_,id)=>{await dbDel('entries',Number(id));return{status:'ok'}};
+localHandlers['POST entries/bulk-delete']=async(d)=>{for(const id of(d.ids||[]))await dbDel('entries',Number(id));return{status:'ok'}};
+// --- Labels ---
+localHandlers['GET labels']=async()=>{const entries=await dbAll('entries');const m={};entries.filter(e=>e.label).forEach(e=>{const k=e.category_id+'|'+e.label;if(!m[k])m[k]={category_id:e.category_id,label:e.label,cnt:0,total_mins:0};m[k].cnt++;m[k].total_mins+=e.minutes||0});return Object.values(m).sort((a,b)=>a.category_id-b.category_id||b.cnt-a.cnt)};
+// --- Settings ---
+localHandlers['GET settings']=async()=>{const s=await dbAll('settings');const r={};s.forEach(x=>r[x.key]=x.value);return r};
+localHandlers['PUT settings']=async(d)=>{const all=await dbAll('settings');const ex=all.find(s=>s.key===d.key);if(ex){ex.value=d.value;await dbPut('settings',ex)}else{await dbAdd('settings',{key:d.key,value:d.value})}return{status:'ok'}};
+// --- Habits ---
+localHandlers['POST habits/log']=async(d)=>{const date=d.logDate||today();const all=await dbAll('habit_logs');const ex=all.find(h=>h.goal_id==d.goalId&&h.log_date===date);if(ex){ex.done=d.done?1:0;if(d.note)ex.note=d.note;await dbPut('habit_logs',ex)}else{await dbAdd('habit_logs',{goal_id:Number(d.goalId),log_date:date,done:d.done?1:0,note:d.note||''})}return{status:'ok'}};
+localHandlers['POST habits/note']=async(d)=>{const date=d.logDate||today();const all=await dbAll('habit_logs');const ex=all.find(h=>h.goal_id==d.goalId&&h.log_date===date);if(ex){ex.note=d.note||'';await dbPut('habit_logs',ex)}else{await dbAdd('habit_logs',{goal_id:Number(d.goalId),log_date:date,done:0,note:d.note||''})}return{status:'ok'}};
+// --- Dashboard ---
+localHandlers['GET dashboard']=async(_,__,params)=>{const dt=params.get('date')||today();const goals=await dbAll('goals');const cats=await dbAll('categories');const hlogs=await dbAll('habit_logs');const entries=await dbAll('entries');const catMap={};cats.forEach(c=>catMap[c.id]=c.name);const d30=new Date();d30.setDate(d30.getDate()-30);const d30s=d30.toISOString().slice(0,10);const ws=getMonday(dt);const we=getSunday(dt);const ms=dt.slice(0,7)+'-01';
+const result=goals.filter(g=>g.progress<100).map(g=>{const ghl=hlogs.filter(h=>h.goal_id===g.id);const doneToday=ghl.filter(h=>h.log_date===dt&&h.done).length;const todayLog=ghl.find(h=>h.log_date===dt);const s30=ghl.filter(h=>h.done&&h.log_date>=d30s).length;const doneWeek=ghl.filter(h=>h.done&&h.log_date>=ws&&h.log_date<=we).length;const doneMonth=ghl.filter(h=>h.done&&h.log_date>=ms).length;const ge=entries.filter(e=>e.goal_id===g.id);const minsWeek=ge.filter(e=>e.entry_date>=ws&&e.entry_date<=we).reduce((s,e)=>s+(e.minutes||0),0);const minsMonth=ge.filter(e=>e.entry_date>=ms).reduce((s,e)=>s+(e.minutes||0),0);return{...g,cat_name:catMap[g.category_id]||'',done_today:doneToday,today_note:todayLog?.note||null,streak_30d:s30,done_this_week:doneWeek,done_this_month:doneMonth,mins_this_week:minsWeek,mins_this_month:minsMonth,smart:{specific:g.smart_specific||'',measurable:g.smart_measurable||'',achievable:g.smart_achievable||'',relevant:g.smart_relevant||'',timeBound:g.smart_timebound||''}}}).sort((a,b)=>{const fo=['daily','weekly','monthly','yearly','once'];return fo.indexOf(a.frequency)-fo.indexOf(b.frequency)||a.title.localeCompare(b.title)});
+// Streak
+const uniqueDates=[...new Set(hlogs.filter(h=>h.done).map(h=>h.log_date))].sort().reverse();let streak=0,checkDate=dt;for(const d of uniqueDates){if(d===checkDate){streak++;const cd=new Date(checkDate+'T12:00:00');cd.setDate(cd.getDate()-1);checkDate=cd.toISOString().slice(0,10)}else if(d<checkDate)break}
+return{goals:result,streak,today:dt}};
+// --- Tracking ---
+localHandlers['GET goals/:id/tracking']=async(_,id)=>{const all=await dbAll('tracking_entries');return all.filter(t=>t.goal_id==id).sort((a,b)=>b.entry_date.localeCompare(a.entry_date))};
+localHandlers['POST goals/:id/tracking']=async(d,id)=>{id=Number(id);const eid=await dbAdd('tracking_entries',{goal_id:id,value:d.value,note:d.note||'',entry_date:d.entryDate||today(),created_at:new Date().toISOString()});return{id:eid,status:'ok'}};
+localHandlers['DELETE tracking/:id']=async(_,id)=>{await dbDel('tracking_entries',Number(id));return{status:'ok'}};
+// --- Life Values & Matrix ---
+localHandlers['GET life-values']=async()=>(await dbAll('life_values')).sort((a,b)=>(b.importance||0)-(a.importance||0));
+localHandlers['POST life-values']=async(d)=>{const id=await dbAdd('life_values',{category_id:d.categoryId?Number(d.categoryId):null,area_name:d.areaName,importance:d.importance||5,satisfaction:d.satisfaction||5,ideal_hours_week:d.idealHoursWeek||0});return{id,status:'ok'}};
+localHandlers['PUT life-values/:id']=async(d,id)=>{const v=await dbGet('life_values',id);if(v){Object.assign(v,{category_id:d.categoryId?Number(d.categoryId):null,area_name:d.areaName,importance:d.importance||5,satisfaction:d.satisfaction||5,ideal_hours_week:d.idealHoursWeek||0});await dbPut('life_values',v)}return{status:'ok'}};
+localHandlers['DELETE life-values/:id']=async(_,id)=>{await dbDel('life_values',Number(id));return{status:'ok'}};
+localHandlers['GET life-matrix']=async()=>{const vals=await dbAll('life_values');const cats=await dbAll('categories');const entries=await dbAll('entries');const d28=new Date();d28.setDate(d28.getDate()-28);const d28s=d28.toISOString().slice(0,10);const catMap={};cats.forEach(c=>catMap[c.id]=c.name);const actuals={};entries.filter(e=>e.entry_date>=d28s).forEach(e=>{if(!actuals[e.category_id])actuals[e.category_id]={mins:0};actuals[e.category_id].mins+=e.minutes||0});const totalImp=vals.reduce((s,v)=>s+(v.importance||0),0);const totalHpw=Object.values(actuals).reduce((s,a)=>s+a.mins/60/4,0);const matrix=vals.map(v=>{const ahpw=v.category_id&&actuals[v.category_id]?actuals[v.category_id].mins/60/4:0;const ipct=totalImp>0?Math.round(v.importance/totalImp*100):0;const tpct=totalHpw>0?Math.round(ahpw/totalHpw*100):0;return{id:v.id,area_name:v.area_name,cat_name:catMap[v.category_id]||'',importance:v.importance,satisfaction:v.satisfaction,ideal_hours_week:v.ideal_hours_week,actual_hours_week:Math.round(ahpw*10)/10,importance_pct:ipct,time_pct:tpct,gap:ipct-tpct}});const tqi=matrix.length?Math.round(matrix.reduce((s,m)=>s+(100-Math.abs(m.gap)),0)/matrix.length):0;return{matrix,tqi,totalActualHours:Math.round(totalHpw*10)/10}};
+// --- Weight ---
+localHandlers['GET weight']=async(_,__,params)=>{const days=parseInt(params.get('days'))||90;const since=new Date();since.setDate(since.getDate()-days);const sinceS=since.toISOString().slice(0,10);const logs=(await dbAll('weight_logs')).filter(l=>l.log_date>=sinceS).sort((a,b)=>b.log_date.localeCompare(a.log_date));const settings=await dbAll('settings');const tgt=settings.find(s=>s.key==='weight_target');return{logs,target:tgt?tgt.value:null}};
+localHandlers['POST weight']=async(d)=>{const date=d.logDate||today();const all=await dbAll('weight_logs');const ex=all.find(w=>w.log_date===date);if(ex){ex.weight=d.weight;ex.note=d.note||'';await dbPut('weight_logs',ex)}else{await dbAdd('weight_logs',{log_date:date,weight:d.weight,note:d.note||''})}return{status:'ok'}};
+localHandlers['DELETE weight/:id']=async(_,id)=>{await dbDel('weight_logs',Number(id));return{status:'ok'}};
+localHandlers['POST weight/target']=async(d)=>{const all=await dbAll('settings');const ex=all.find(s=>s.key==='weight_target');if(ex){ex.value=String(d.target);await dbPut('settings',ex)}else{await dbAdd('settings',{key:'weight_target',value:String(d.target)})}return{status:'ok'}};
+// --- Lessons ---
+localHandlers['GET lessons']=async()=>{const l=await dbAll('lessons');const cats=await dbAll('categories');const cm={};cats.forEach(c=>cm[c.id]=c.name);return l.sort((a,b)=>(b.entry_date||'').localeCompare(a.entry_date||'')).map(x=>({...x,cat_name:cm[x.category_id]||''}))};
+localHandlers['POST lessons']=async(d)=>{const id=await dbAdd('lessons',{category_id:d.categoryId?Number(d.categoryId):null,title:d.title,content:d.content||'',entry_date:d.entryDate||today(),sort_order:0,created_at:new Date().toISOString()});return{id,status:'ok'}};
+localHandlers['PUT lessons/:id']=async(d,id)=>{const l=await dbGet('lessons',id);if(l){Object.assign(l,{category_id:d.categoryId?Number(d.categoryId):null,title:d.title,content:d.content||'',entry_date:d.entryDate||today()});await dbPut('lessons',l)}return{status:'ok'}};
+localHandlers['DELETE lessons/:id']=async(_,id)=>{await dbDel('lessons',Number(id));return{status:'ok'}};
+// --- Budgets ---
+localHandlers['GET budgets']=async()=>{const b=await dbAll('budgets');const cats=await dbAll('categories');const be=await dbAll('budget_entries');const cm={};cats.forEach(c=>cm[c.id]=c.name);return b.map(x=>{const bEntries=be.filter(e=>e.budget_id===x.id);return{...x,cat_name:cm[x.category_id]||'',total_expenses:bEntries.filter(e=>e.entry_type==='expense').reduce((s,e)=>s+(e.amount||0),0),total_income:bEntries.filter(e=>e.entry_type==='income').reduce((s,e)=>s+(e.amount||0),0)}}).sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||''))};
+localHandlers['POST budgets']=async(d)=>{const id=await dbAdd('budgets',{category_id:d.categoryId?Number(d.categoryId):null,goal_id:d.goalId?Number(d.goalId):null,name:d.name,currency:d.currency||'CHF',budget_amount:d.budgetAmount||0,period:d.period||'monthly',start_date:d.startDate||null,end_date:d.endDate||null,created_at:new Date().toISOString()});return{id,status:'ok'}};
+localHandlers['PUT budgets/:id']=async(d,id)=>{const b=await dbGet('budgets',id);if(b){Object.assign(b,{name:d.name,category_id:d.categoryId?Number(d.categoryId):null,goal_id:d.goalId?Number(d.goalId):null,currency:d.currency||'CHF',budget_amount:d.budgetAmount||0,period:d.period||'monthly',start_date:d.startDate||null,end_date:d.endDate||null});await dbPut('budgets',b)}return{status:'ok'}};
+localHandlers['DELETE budgets/:id']=async(_,id)=>{id=Number(id);const be=await dbAll('budget_entries');for(const e of be)if(e.budget_id===id)await dbDel('budget_entries',e.id);const bc=await dbAll('budget_categories');for(const c of bc)if(c.budget_id===id)await dbDel('budget_categories',c.id);await dbDel('budgets',id);return{status:'ok'}};
+localHandlers['GET budgets/:id/entries']=async(_,id)=>(await dbAll('budget_entries')).filter(e=>e.budget_id==id).sort((a,b)=>(b.entry_date||'').localeCompare(a.entry_date||''));
+localHandlers['POST budgets/:id/entries']=async(d,id)=>{const eid=await dbAdd('budget_entries',{budget_id:Number(id),budget_category_id:d.budgetCategoryId?Number(d.budgetCategoryId):null,amount:d.amount,entry_type:d.entryType||'expense',note:d.note||'',entry_date:d.entryDate||today(),created_at:new Date().toISOString()});return{id:eid,status:'ok'}};
+localHandlers['DELETE budget-entries/:id']=async(_,id)=>{await dbDel('budget_entries',Number(id));return{status:'ok'}};
+localHandlers['GET budget-summary']=async()=>{const budgets=await dbAll('budgets');const be=await dbAll('budget_entries');const now=new Date();const cm=now.getMonth(),cy=now.getFullYear();return budgets.map(b=>{const bes=be.filter(e=>e.budget_id===b.id);return{id:b.id,name:b.name,currency:b.currency,budget_amount:b.budget_amount,period:b.period,total_expenses:bes.filter(e=>e.entry_type==='expense').reduce((s,e)=>s+(e.amount||0),0),total_income:bes.filter(e=>e.entry_type==='income').reduce((s,e)=>s+(e.amount||0),0),month_expenses:bes.filter(e=>e.entry_type==='expense'&&e.entry_date).filter(e=>{const d=new Date(e.entry_date);return d.getMonth()===cm&&d.getFullYear()===cy}).reduce((s,e)=>s+(e.amount||0),0),month_income:bes.filter(e=>e.entry_type==='income'&&e.entry_date).filter(e=>{const d=new Date(e.entry_date);return d.getMonth()===cm&&d.getFullYear()===cy}).reduce((s,e)=>s+(e.amount||0),0)}})};
+localHandlers['GET budgets/:id/dashboard']=async(_,id)=>{const b=await dbGet('budgets',Number(id));if(!b)return{error:'Not found'};const allCats=(await dbAll('budget_categories')).filter(c=>c.budget_id==id);const be=await dbAll('budget_entries');const now=new Date();const cm=now.getMonth(),cy=now.getFullYear();const cats=allCats.sort((a,b)=>(a.sort_order||0)-(b.sort_order||0)).map(c=>{const ces=be.filter(e=>e.budget_category_id===c.id);return{...c,actual_expense:ces.filter(e=>e.entry_type==='expense').reduce((s,e)=>s+(e.amount||0),0),actual_income:ces.filter(e=>e.entry_type==='income').reduce((s,e)=>s+(e.amount||0),0),month_expense:ces.filter(e=>e.entry_type==='expense'&&e.entry_date).filter(e=>{const d=new Date(e.entry_date);return d.getMonth()===cm&&d.getFullYear()===cy}).reduce((s,e)=>s+(e.amount||0),0),month_income:ces.filter(e=>e.entry_type==='income'&&e.entry_date).filter(e=>{const d=new Date(e.entry_date);return d.getMonth()===cm&&d.getFullYear()===cy}).reduce((s,e)=>s+(e.amount||0),0)}});return{budget:b,categories:cats}};
+localHandlers['GET budgets/:id/categories']=async(_,id)=>(await dbAll('budget_categories')).filter(c=>c.budget_id==id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
+localHandlers['POST budgets/:id/categories']=async(d,id)=>{const cid=await dbAdd('budget_categories',{budget_id:Number(id),parent_id:d.parentId?Number(d.parentId):null,name:d.name,budget_yearly:d.budgetYearly||0,budget_monthly:d.budgetMonthly||0,sort_order:d.sortOrder||0,is_income:d.isIncome||0});return{id:cid,status:'ok'}};
+localHandlers['PUT budget-categories/:id']=async(d,id)=>{const c=await dbGet('budget_categories',id);if(c){c.name=d.name;c.budget_yearly=d.budgetYearly||0;c.budget_monthly=d.budgetMonthly||0;c.is_income=d.isIncome||0;await dbPut('budget_categories',c)}return{status:'ok'}};
+localHandlers['DELETE budget-categories/:id']=async(_,id)=>{await dbDel('budget_categories',Number(id));return{status:'ok'}};
+localHandlers['POST budgets/:id/init-template']=async(_,id)=>{id=Number(id);const existing=await dbAll('budget_categories');if(existing.some(c=>c.budget_id===id))return{status:'already_initialized'};const tpl=[[0,'Einnahmen',0,0,0,1],[0,'Fixkosten',0,0,10,0],[0,'Haushalt',9600,800,40,0],[0,'Persönliche Ausgaben',3000,250,50,0],[0,'Rückstellungen',16596,1383,60,0]];const pids={};let pidx=0;for(const t of tpl){pidx++;const cid=await dbAdd('budget_categories',{budget_id:id,parent_id:null,name:t[1],budget_yearly:t[2],budget_monthly:t[3],sort_order:t[4],is_income:t[5]});pids[pidx]=cid}return{status:'ok'}};
+// --- Fitness ---
+localHandlers['GET fitness/plans']=async()=>{const p=await dbAll('fitness_plans');const d=await dbAll('fitness_days');return p.map(x=>({...x,day_count:d.filter(dd=>dd.plan_id===x.id).length})).sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||''))};
+localHandlers['POST fitness/plans']=async(d)=>{const id=await dbAdd('fitness_plans',{name:d.name,description:d.description||'',created_at:new Date().toISOString()});return{id,status:'ok'}};
+localHandlers['DELETE fitness/plans/:id']=async(_,id)=>{await dbDel('fitness_plans',Number(id));return{status:'ok'}};
+localHandlers['GET fitness/plans/:id/days']=async(_,id)=>{const d=await dbAll('fitness_days');const ex=await dbAll('fitness_exercises');return d.filter(x=>x.plan_id==id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0)).map(x=>({...x,ex_count:ex.filter(e=>e.plan_day_id===x.id).length}))};
+localHandlers['POST fitness/plans/:id/days']=async(d,id)=>{const did=await dbAdd('fitness_days',{plan_id:Number(id),user_id:1,day_name:d.dayName,focus:d.focus||'',sort_order:d.sortOrder||0});return{id:did,status:'ok'}};
+localHandlers['DELETE fitness/days/:id']=async(_,id)=>{await dbDel('fitness_days',Number(id));return{status:'ok'}};
+localHandlers['GET fitness/days/:id/exercises']=async(_,id)=>(await dbAll('fitness_exercises')).filter(e=>e.plan_day_id==id).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));
+localHandlers['POST fitness/days/:id/exercises']=async(d,id)=>{const eid=await dbAdd('fitness_exercises',{plan_day_id:Number(id),user_id:1,exercise_name:d.exerciseName,target_sets:d.targetSets||3,target_reps:d.targetReps||10,target_weights:d.targetWeights||'',note:d.note||'',sort_order:d.sortOrder||0});return{id:eid,status:'ok'}};
+localHandlers['PUT fitness/exercises/:id']=async(d,id)=>{const e=await dbGet('fitness_exercises',id);if(e){Object.assign(e,{exercise_name:d.exerciseName,target_sets:d.targetSets||3,target_reps:d.targetReps||10,target_weights:d.targetWeights||'',note:d.note||''});await dbPut('fitness_exercises',e)}return{status:'ok'}};
+localHandlers['DELETE fitness/exercises/:id']=async(_,id)=>{await dbDel('fitness_exercises',Number(id));return{status:'ok'}};
+localHandlers['POST fitness/days/:id/start-session']=async(_,dayId)=>{dayId=Number(dayId);const day=await dbGet('fitness_days',dayId);const plan=day?await dbGet('fitness_plans',day.plan_id):null;const sid=await dbAdd('fitness_sessions',{plan_day_id:dayId,session_name:(plan?.name||'')+' - '+(day?.day_name||'')+': '+(day?.focus||''),started_at:new Date().toISOString(),ended_at:null});const exs=(await dbAll('fitness_exercises')).filter(e=>e.plan_day_id===dayId).sort((a,b)=>(a.sort_order||0)-(b.sort_order||0));for(const ex of exs){const ws=ex.target_weights?ex.target_weights.split(','):[];for(let s=1;s<=ex.target_sets;s++){const w=ws[s-1]?ws[s-1].trim():(ws.length?ws[ws.length-1].trim():null);await dbAdd('session_sets',{session_id:sid,exercise_id:ex.id,user_id:1,exercise_name:ex.exercise_name,set_number:s,target_reps:ex.target_reps,target_weight:w,actual_reps:null,actual_weight:null,done:0})}}return{id:sid,status:'ok'}};
+localHandlers['GET fitness/sessions/active']=async()=>{const s=(await dbAll('fitness_sessions')).filter(x=>!x.ended_at).sort((a,b)=>(b.started_at||'').localeCompare(a.started_at||''));if(!s.length)return null;const sets=(await dbAll('session_sets')).filter(x=>x.session_id===s[0].id).sort((a,b)=>a.exercise_name.localeCompare(b.exercise_name)||a.set_number-b.set_number);return{...s[0],sets}};
+localHandlers['GET fitness/sessions/:id']=async(_,id)=>{const s=await dbGet('fitness_sessions',Number(id));if(!s)return{error:'Not found'};s.sets=(await dbAll('session_sets')).filter(x=>x.session_id===s.id).sort((a,b)=>a.exercise_name.localeCompare(b.exercise_name)||a.set_number-b.set_number);return s};
+localHandlers['POST fitness/sessions/:id/end']=async(_,id)=>{const s=await dbGet('fitness_sessions',Number(id));if(s){s.ended_at=new Date().toISOString();await dbPut('fitness_sessions',s)}return{status:'ok'}};
+localHandlers['POST fitness/sessions/:id/log-set']=async(d,sid)=>{const set=await dbGet('session_sets',Number(d.setId));if(set){set.actual_reps=d.actualReps;set.actual_weight=d.actualWeight||null;set.done=1;await dbPut('session_sets',set)}return{status:'ok'}};
+localHandlers['POST fitness/sets/:id/toggle']=async(_,id)=>{const s=await dbGet('session_sets',Number(id));if(s){s.done=s.done?0:1;s.actual_reps=s.done?s.target_reps:null;s.actual_weight=s.done?s.target_weight:null;await dbPut('session_sets',s)}return{status:'ok'}};
+localHandlers['GET fitness/sessions']=async()=>{const s=await dbAll('fitness_sessions');const sets=await dbAll('session_sets');return s.sort((a,b)=>(b.started_at||'').localeCompare(a.started_at||'')).slice(0,30).map(x=>({...x,sets_done:sets.filter(ss=>ss.session_id===x.id&&ss.done).length,sets_total:sets.filter(ss=>ss.session_id===x.id).length}))};
+localHandlers['GET fitness/goals']=async()=>(await dbAll('fitness_goals')).sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||''));
+localHandlers['POST fitness/goals']=async(d)=>{const id=await dbAdd('fitness_goals',{exercise_name:d.exerciseName,goal_type:d.goalType||'reps',target_value:d.targetValue,current_value:d.currentValue||0,unit:d.unit||'',deadline:d.deadline||null,created_at:new Date().toISOString()});return{id,status:'ok'}};
+localHandlers['PUT fitness/goals/:id']=async(d,id)=>{const g=await dbGet('fitness_goals',id);if(g){Object.assign(g,{exercise_name:d.exerciseName,goal_type:d.goalType||'reps',target_value:d.targetValue,current_value:d.currentValue||0,unit:d.unit||'',deadline:d.deadline||null});await dbPut('fitness_goals',g)}return{status:'ok'}};
+localHandlers['DELETE fitness/goals/:id']=async(_,id)=>{await dbDel('fitness_goals',Number(id));return{status:'ok'}};
+// --- Stats ---
+localHandlers['GET stats']=async()=>{const cats=await dbAll('categories');const goals=await dbAll('goals');const entries=await dbAll('entries');const d7=new Date();d7.setDate(d7.getDate()-6);const d7s=d7.toISOString().slice(0,10);const catStats=cats.map(c=>({id:c.id,name:c.name,description:c.description||'',goal_count:goals.filter(g=>g.category_id===c.id).length,completed:goals.filter(g=>g.category_id===c.id&&g.progress>=100).length,total_mins:entries.filter(e=>e.category_id===c.id).reduce((s,e)=>s+(e.minutes||0),0),entry_count:entries.filter(e=>e.category_id===c.id).length}));const weekData=entries.filter(e=>e.entry_date>=d7s).reduce((acc,e)=>{const k=e.entry_date+'|'+e.category_id;if(!acc[k])acc[k]={entry_date:e.entry_date,category_id:e.category_id,total_mins:0};acc[k].total_mins+=e.minutes||0;return acc},{});return{catStats,weekData:Object.values(weekData)}};
+// --- Goal Stats ---
+localHandlers['GET goal-stats']=async(_,__,params)=>{const from=params.get('from');const to=params.get('to');const pf=params.get('prevFrom');const pt=params.get('prevTo');const goals=await dbAll('goals');const cats=await dbAll('categories');const hlogs=await dbAll('habit_logs');const entries=await dbAll('entries');const cm={};cats.forEach(c=>cm[c.id]=c.name);const gs=goals.map(g=>{const ghl=hlogs.filter(h=>h.goal_id===g.id&&h.done);const ge=entries.filter(e=>e.goal_id===g.id);return{...g,cat_name:cm[g.category_id]||'',completions:from?ghl.filter(h=>h.log_date>=from&&h.log_date<=to).length:ghl.length,total_completions:ghl.length,prev_completions:pf?ghl.filter(h=>h.log_date>=pf&&h.log_date<=pt).length:0,period_minutes:from?ge.filter(e=>e.entry_date>=from&&e.entry_date<=to).reduce((s,e)=>s+(e.minutes||0),0):ge.reduce((s,e)=>s+(e.minutes||0),0),prev_minutes:pf?ge.filter(e=>e.entry_date>=pf&&e.entry_date<=pt).reduce((s,e)=>s+(e.minutes||0),0):0,total_minutes:ge.reduce((s,e)=>s+(e.minutes||0),0),smart:{specific:g.smart_specific||'',measurable:g.smart_measurable||'',achievable:g.smart_achievable||'',relevant:g.smart_relevant||'',timeBound:g.smart_timebound||''}}});const hd=from?Object.values(hlogs.filter(h=>h.done&&h.log_date>=from&&h.log_date<=to).reduce((a,h)=>{if(!a[h.log_date])a[h.log_date]={log_date:h.log_date,cnt:0};a[h.log_date].cnt++;return a},{})):[];return{goals:gs,habitDaily:hd}};
+// --- Time Stats ---
+localHandlers['GET time-stats']=async(_,__,params)=>{const from=params.get('from');const to=params.get('to');const pf=params.get('prevFrom');const pt=params.get('prevTo');const cats=await dbAll('categories');const entries=await dbAll('entries');const inRange=from?entries.filter(e=>e.entry_date>=from&&e.entry_date<=to):entries;const inPrev=pf?entries.filter(e=>e.entry_date>=pf&&e.entry_date<=pt):[];const curTotal=inRange.reduce((s,e)=>s+(e.minutes||0),0);const prevTotal=inPrev.reduce((s,e)=>s+(e.minutes||0),0);
+const byCat=cats.map(c=>({id:c.id,name:c.name,total_mins:inRange.filter(e=>e.category_id===c.id).reduce((s,e)=>s+(e.minutes||0),0),prev_mins:inPrev.filter(e=>e.category_id===c.id).reduce((s,e)=>s+(e.minutes||0),0),entry_count:inRange.filter(e=>e.category_id===c.id).length}));
+const byLabel=Object.values(inRange.filter(e=>e.label).reduce((a,e)=>{const k=e.category_id+'|'+e.label;if(!a[k])a[k]={category_id:e.category_id,label:e.label,total_mins:0,entry_count:0};a[k].total_mins+=e.minutes||0;a[k].entry_count++;return a},{})).sort((a,b)=>b.total_mins-a.total_mins);
+return{byCategory:byCat,byLabel,curTotal,prevTotal,byDow:[],byMonth:[],daily:[],byHour:[],dailyCat:[]}};
+// --- Habits History ---
+localHandlers['GET habits/:id/history']=async(_,id)=>(await dbAll('habit_logs')).filter(h=>h.goal_id==id).sort((a,b)=>b.log_date.localeCompare(a.log_date)).slice(0,30);
+
+// Helper functions
+function getMonday(dateStr){const d=new Date(dateStr+'T12:00:00');const day=d.getDay();const diff=d.getDate()-day+(day===0?-6:1);d.setDate(diff);return d.toISOString().slice(0,10)}
+function getSunday(dateStr){const m=getMonday(dateStr);const d=new Date(m+'T12:00:00');d.setDate(d.getDate()+6);return d.toISOString().slice(0,10)}
+
+// ═══════════════════════════════════════════════════════════════
+// API Router - matches paths to handlers
+// ═══════════════════════════════════════════════════════════════
+function matchRoute(method,path){
+  const key=method+' '+path;
+  if(localHandlers[key])return{handler:localHandlers[key],id:null};
+  // Try pattern matching
+  for(const pattern in localHandlers){
+    const[pm,...pparts]=pattern.split(' ');
+    if(pm!==method)continue;
+    const pp=pparts.join(' ');
+    const regex=pp.replace(/:id/g,'(\\d+)');
+    const m=path.match(new RegExp('^'+regex+'$'));
+    if(m)return{handler:localHandlers[pattern],id:m[1]};
+  }
+  return null;
+}
+const api={
+  get:async(ep)=>{try{const[path,qs]=ep.split('?');const params=new URLSearchParams(qs||'');const route=matchRoute('GET',path);if(route)return await route.handler(null,route.id,params);console.warn('No handler for GET',path);return{error:'Not found'}}catch(e){console.error('API GET error:',ep,e);return{error:e.message}}},
+  post:async(ep,d)=>{try{const route=matchRoute('POST',ep);if(route)return await route.handler(d||{},route.id);console.warn('No handler for POST',ep);return{error:'Not found'}}catch(e){console.error('API POST error:',ep,e);return{error:e.message}}},
+  put:async(ep,d)=>{try{const route=matchRoute('PUT',ep);if(route)return await route.handler(d||{},route.id);console.warn('No handler for PUT',ep);return{error:'Not found'}}catch(e){console.error('API PUT error:',ep,e);return{error:e.message}}},
+  del:async(ep)=>{try{const route=matchRoute('DELETE',ep);if(route)return await route.handler(null,route.id);console.warn('No handler for DELETE',ep);return{error:'Not found'}}catch(e){console.error('API DEL error:',ep,e);return{error:e.message}}}
+};
+</script>
+<script type="text/babel">
+const{useState,useEffect,useRef}=React;
+const T={bg:"#0d1117",card:"#161b22",border:"#21262d",text:"#f0f6fc",textSec:"#9ca8b6",textMuted:"#606a75",
+  accent:"#e8553a",blue:"#3a8fe8",green:"#2ecc71",orange:"#f39c12",purple:"#9b59b6",teal:"#1abc9c",
+  colors:["#e8553a","#3a8fe8","#2ecc71","#f39c12","#9b59b6","#1abc9c","#e74c6c","#34495e","#d35400","#27ae60"]};
+
+const fmtMins=m=>{if(!m)return"0m";const h=Math.floor(m/60),r=m%60;return h&&r?h+"h "+r+"m":h?h+"h":r+"m"};
+const fmtDate=d=>new Date(d+'T12:00:00').toLocaleDateString("de-CH",{weekday:"short",day:"numeric",month:"short"});
+const fmtDateShort=d=>new Date(d+'T12:00:00').toLocaleDateString("de-CH",{weekday:"short",day:"numeric"});
+const daysLeft=d=>Math.max(0,Math.ceil((new Date(d)-new Date())/864e5));
+const nowTime=()=>{const d=new Date();return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')};
+const smartLabels={specific:{l:"Specific",d:"Was genau?",i:"\u{1F3AF}"},measurable:{l:"Measurable",d:"Wie messen?",i:"\u{1F4CF}"},achievable:{l:"Achievable",d:"Realistisch?",i:"\u2705"},relevant:{l:"Relevant",d:"Warum wichtig?",i:"\u{1F4A1}"},timeBound:{l:"Time-bound",d:"Bis wann?",i:"\u23F0"}};
+
+const S={
+  btn:c=>({background:c||T.accent,color:"#fff",border:"none",borderRadius:10,padding:"10px 20px",fontWeight:600,fontSize:15,cursor:"pointer",fontFamily:"inherit"}),
+  btnSm:c=>({background:c||T.accent,color:"#fff",border:"none",borderRadius:8,padding:"6px 14px",fontWeight:600,fontSize:14,cursor:"pointer",fontFamily:"inherit"}),
+  btnO:c=>({background:"transparent",color:c||T.textSec,border:"1px solid "+T.border,borderRadius:8,padding:"6px 14px",fontWeight:600,fontSize:14,cursor:"pointer",fontFamily:"inherit"}),
+  card:{background:T.card,borderRadius:16,border:"1px solid "+T.border,padding:20},
+  inp:{background:T.bg,border:"1px solid "+T.border,borderRadius:10,padding:"10px 14px",color:T.text,fontSize:15,width:"100%",boxSizing:"border-box",outline:"none",fontFamily:"inherit"},
+  sel:{background:T.bg,border:"1px solid "+T.border,borderRadius:10,padding:"10px 14px",color:T.text,fontSize:15,width:"100%",boxSizing:"border-box",outline:"none",appearance:"none",cursor:"pointer",fontFamily:"inherit"},
+  lbl:{fontSize:13,fontWeight:700,color:T.textSec,letterSpacing:1,marginBottom:6},
+  badge:c=>({display:"inline-flex",alignItems:"center",gap:4,padding:"4px 10px",borderRadius:20,fontSize:13,fontWeight:600,background:c+"22",color:c})
+};
+
+const Bar=({pct,color,h})=><div style={{width:"100%",height:h||6,background:T.border,borderRadius:(h||6)/2,overflow:"hidden"}}><div style={{width:Math.min(100,Math.max(0,pct||0))+"%",height:"100%",background:color||T.accent,borderRadius:(h||6)/2,transition:"width .6s"}}/></div>;
+const Modal=({open,onClose,title,children})=>{if(!open)return null;return<div style={{position:"fixed",inset:0,zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,.7)"}} onClick={onClose}><div style={{...S.card,maxWidth:520,width:"92%",maxHeight:"85vh",overflowY:"auto",animation:"fadeIn .2s"}} onClick={e=>e.stopPropagation()}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}><h3 style={{margin:0,fontSize:18}}>{title}</h3><button onClick={onClose} style={{background:"none",border:"none",color:T.textSec,fontSize:20,cursor:"pointer"}}>&#x2715;</button></div>{children}</div></div>};
+const Empty=({icon,title,sub})=><div style={{textAlign:"center",padding:"40px 20px"}}><div style={{fontSize:48,marginBottom:12}}>{icon}</div><div style={{color:T.textSec,fontWeight:600,fontSize:15,marginBottom:4}}>{title}</div><div style={{color:T.textMuted,fontSize:13}}>{sub}</div></div>;
+const fmtTS=ts=>{if(!ts)return'—';const d=new Date(ts);return d.toLocaleDateString('de-CH',{day:'numeric',month:'short',year:'numeric'})+' '+d.toLocaleTimeString('de-CH',{hour:'2-digit',minute:'2-digit'})};
+
+// ═══ Drag & Drop ═══
+function useDrag(items,onReorder){
+  const[dragIdx,setDI]=useState(null);const[overIdx,setOI]=useState(null);
+  const onDS=(e,i)=>{setDI(i);e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',i)};
+  const onDO=(e,i)=>{e.preventDefault();if(i!==dragIdx)setOI(i)};
+  const onDE=()=>{
+    if(dragIdx!==null&&overIdx!==null&&dragIdx!==overIdx){
+      const a=[...items];const[m]=a.splice(dragIdx,1);a.splice(overIdx,0,m);onReorder(a);
+    }
+    setDI(null);setOI(null);
+  };
+  return{dragIdx,overIdx,onDS,onDO,onDE};
+}
+const DragHandle=({onDS,idx})=><div draggable onDragStart={e=>onDS(e,idx)} style={{cursor:"grab",padding:"4px 6px",color:T.textMuted,fontSize:18,lineHeight:1,userSelect:"none",touchAction:"none"}} title="Verschieben">{"\u2261"}</div>;
+
+function Sidebar({tab,setTab,user,onLogout,isMobile,isOpen,setIsOpen,onExport,onImport}){
+  const items=[
+    {k:"dash",icon:"\u{1F4CB}",label:"Dashboard",color:"#e8553a"},
+    {k:"erfassung",icon:"\u23F1",label:"Erfassung",color:T.blue},
+    {k:"tracking",icon:"\u{1F504}",label:"Tracking",color:T.green},
+    {k:"auswertungen",icon:"\u{1F4CA}",label:"Auswertungen",color:"#e74c6c"},
+    {k:"goals",icon:"\u{1F3AF}",label:"Goals",color:T.accent},
+    {k:"fitness",icon:"\u{1F4AA}",label:"Fitness",color:"#e67e22"},
+    {k:"weight",icon:"\u{2696}\u{FE0F}",label:"Gewicht",color:"#00b894"},
+    {k:"matrix",icon:"\u{1F9ED}",label:"Life Matrix",color:T.purple},
+    {k:"budget",icon:"\u{1F4B0}",label:"Budget",color:T.teal},
+    {k:"lessons",icon:"\u{1F4D6}",label:"Lessons",color:"#8e44ad"},
+    {k:"cats",icon:"\u{1F4C1}",label:"Kategorien",color:T.orange}
+  ];
+  const sw=isMobile?260:220;
+  const sty=isMobile?{position:"fixed",left:isOpen?0:-sw-20,top:0,bottom:0,width:sw,zIndex:999,background:T.bg,borderRight:"1px solid "+T.border,transition:"left .3s",display:"flex",flexDirection:"column",boxShadow:isOpen?"4px 0 20px rgba(0,0,0,.5)":"none"}
+    :{width:sw,flexShrink:0,background:T.bg,borderRight:"1px solid "+T.border,display:"flex",flexDirection:"column",height:"100vh"};
+  return<>{isMobile&&isOpen&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:998}} onClick={()=>setIsOpen(false)}/>}
+    <div style={sty}>
+      <div style={{padding:"24px 20px 20px"}}><h1 style={{fontSize:22,fontWeight:700,margin:0,fontFamily:"'JetBrains Mono',monospace",background:"linear-gradient(135deg,"+T.accent+","+T.orange+")",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>TimeFlow</h1><div style={{fontSize:12,color:T.textMuted,marginTop:4}}>{"\u{1F4F1}"} Lokal</div></div>
+      <div style={{flex:1,padding:"8px 12px",display:"flex",flexDirection:"column",gap:4}}>
+        {items.map(it=>{const a=tab===it.k;return<button key={it.k} onClick={()=>{setTab(it.k);if(isMobile)setIsOpen(false)}} style={{display:"flex",alignItems:"center",gap:14,padding:"14px 16px",border:"none",borderRadius:12,cursor:"pointer",fontFamily:"inherit",background:a?T.card:"transparent",color:a?T.text:T.textSec,fontSize:15,fontWeight:a?700:500,textAlign:"left",width:"100%"}}>
+          <span style={{fontSize:24,lineHeight:1}}>{it.icon}</span><span>{it.label}</span>{a&&<div style={{marginLeft:"auto",width:4,height:20,borderRadius:2,background:it.color}}/>}
+        </button>})}
+      </div>
+      <div style={{padding:"16px 12px",borderTop:"1px solid "+T.border,display:"flex",flexDirection:"column",gap:4}}>
+        {onExport&&<button onClick={onExport} style={{display:"flex",alignItems:"center",gap:14,padding:"10px 16px",border:"none",borderRadius:12,cursor:"pointer",fontFamily:"inherit",background:"transparent",color:T.textMuted,fontSize:13,width:"100%",textAlign:"left"}}><span style={{fontSize:20}}>{"\u{1F4BE}"}</span><span>Backup</span></button>}
+        {onImport&&<button onClick={onImport} style={{display:"flex",alignItems:"center",gap:14,padding:"10px 16px",border:"none",borderRadius:12,cursor:"pointer",fontFamily:"inherit",background:"transparent",color:T.textMuted,fontSize:13,width:"100%",textAlign:"left"}}><span style={{fontSize:20}}>{"\u{1F4E5}"}</span><span>Import</span></button>}
+      </div>
+    </div></>
+}
+
+function PageHeader({title,icon,children,isMobile,setMenuOpen}){
+  return<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+    <div style={{display:"flex",alignItems:"center",gap:12}}>
+      {isMobile&&<button onClick={()=>setMenuOpen(true)} style={{background:"none",border:"none",color:T.textSec,fontSize:28,cursor:"pointer",padding:0}}>{"\u2630"}</button>}
+      <span style={{fontSize:32}}>{icon}</span><h2 style={{margin:0,fontSize:22,fontWeight:700}}>{title}</h2>
+    </div>
+    <div style={{display:"flex",gap:8}}>{children}</div>
+  </div>
+}
+
+function TrackingPanel({goal,loadData}){
+  const[entries,setE]=useState([]);const[v,setV]=useState("");const[n,setN]=useState("");
+  const load=async()=>{const d=await api.get('goals/'+goal.id+'/tracking');setE(Array.isArray(d)?d:[])};
+  useEffect(()=>{load()},[goal.id]);
+  const add=async()=>{if(!v)return;const r=await api.post('goals/'+goal.id+'/tracking',{value:parseFloat(v),note:n.trim()});if(!r.error){setV("");setN("");load();loadData()}};
+  const latest=entries[0];const trend=entries.length>=2?entries[0].value-entries[1].value:0;
+  return<div style={{marginTop:12,padding:14,background:T.bg,borderRadius:12}}>
+    <div style={{...S.lbl,marginBottom:8}}>TRACKING {goal.tracking_unit?'('+goal.tracking_unit+')':''}</div>
+    {latest&&<div style={{display:"flex",gap:12,marginBottom:12}}>
+      <div style={{textAlign:"center",flex:1}}><div style={{fontSize:24,fontWeight:700,color:T.text}}>{latest.value}</div><div style={{fontSize:11,color:T.textSec}}>Aktuell</div></div>
+      {goal.tracking_target&&<div style={{textAlign:"center",flex:1}}><div style={{fontSize:24,fontWeight:700,color:T.green}}>{goal.tracking_target}</div><div style={{fontSize:11,color:T.textSec}}>Ziel</div></div>}
+      <div style={{textAlign:"center",flex:1}}><div style={{fontSize:24,fontWeight:700,color:trend>0?T.accent:trend<0?T.green:T.textSec}}>{(trend>0?"+":"")+trend.toFixed(1)}</div><div style={{fontSize:11,color:T.textSec}}>Trend</div></div>
+    </div>}
+    <div style={{display:"flex",gap:6,marginBottom:8}}>
+      <input type="number" step="0.1" style={{...S.inp,fontSize:12,padding:"6px 10px",flex:1}} value={v} onChange={e=>setV(e.target.value)} placeholder="Wert" onKeyDown={e=>e.key==='Enter'&&add()}/>
+      <input style={{...S.inp,fontSize:12,padding:"6px 10px",flex:1}} value={n} onChange={e=>setN(e.target.value)} placeholder="Notiz..."/>
+      <button onClick={add} style={S.btnSm(T.teal)}>+</button>
+    </div>
+    {entries.slice(0,5).map(e=><div key={e.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"4px 0",fontSize:12,borderBottom:"1px solid "+T.border}}>
+      <span style={{color:T.textSec}}>{fmtDate(e.entry_date)}</span><span style={{fontWeight:700}}>{e.value} {goal.tracking_unit}</span>
+      <button onClick={async()=>{await api.del('tracking/'+e.id);load();loadData()}} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>&#x2715;</button>
+    </div>)}
+  </div>
+}
+
+/* ============ TIMER ============ */
+function Timer({onStop}){
+  const[sec,setSec]=useState(0);const startRef=useRef(new Date());const intRef=useRef(null);
+  useEffect(()=>{intRef.current=setInterval(()=>setSec(Math.floor((new Date()-startRef.current)/1000)),1000);return()=>clearInterval(intRef.current)},[]);
+  const stop=()=>{clearInterval(intRef.current);onStop({minutes:Math.max(1,Math.round(sec/60)),startTime:startRef.current.toTimeString().slice(0,5),endTime:new Date().toTimeString().slice(0,5)})};
+  const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;
+  return<div style={{...S.card,textAlign:"center",borderColor:T.accent}}>
+    <div style={{fontSize:11,fontWeight:700,color:T.accent,letterSpacing:2,marginBottom:8,animation:"pulse 2s infinite"}}>{"\u25CF"} TIMER</div>
+    <div style={{fontSize:48,fontWeight:700,letterSpacing:2,marginBottom:12}}>{(h>0?h+':':'')+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0')}</div>
+    <div style={{fontSize:12,color:T.textSec,marginBottom:16}}>Start: {startRef.current.toTimeString().slice(0,5)}</div>
+    <button onClick={stop} style={{...S.btn(T.accent),width:"100%",padding:"14px",fontSize:16}}>{"\u23F9"} Stopp</button>
+  </div>
+}
+
+/* ============ DASHBOARD ============ */
+
+function DashboardTab({categories,goals,entries,catColor,catName,loadData,isMobile,setMenuOpen}){
+  const[dash,setDash]=useState({goals:[],minsToday:0,budgets:[],streak:0});
+  const[loading,setLoading]=useState(true);
+
+  const load=async()=>{const d=await api.get('dashboard');if(d&&!d.error)setDash(d);setLoading(false)};
+  useEffect(()=>{load()},[]);
+
+  const allGoals=(dash.goals||[]).filter(g=>g.frequency&&g.frequency!=='once');
+  const dailyDone=allGoals.filter(g=>g.frequency==='daily'&&g.done_today>0).length;
+  const dailyTotal=allGoals.filter(g=>g.frequency==='daily').length;
+  const today=new Date();
+  const dayName=today.toLocaleDateString('de-CH',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+
+  if(loading)return<div style={{textAlign:"center",padding:40,color:T.textSec}}>Laden...</div>;
+
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Dashboard" icon={"\u{1F4CB}"} isMobile={isMobile} setMenuOpen={setMenuOpen}/>
+
+    <div style={{...S.card,marginBottom:16,background:"linear-gradient(135deg,"+T.card+",#1a1f2e)"}}>
+      <div style={{fontSize:13,color:T.textSec,marginBottom:4}}>{dayName}</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginTop:12}}>
+        <div style={{textAlign:"center"}}><div style={{fontSize:38,fontWeight:700,color:T.accent}}>{dash.streak}</div><div style={{fontSize:10,color:T.textSec}}>Tage Streak</div></div>
+        <div style={{textAlign:"center"}}><div style={{fontSize:32,fontWeight:700,color:dailyDone===dailyTotal&&dailyTotal>0?T.green:T.text}}>{dailyDone}/{dailyTotal}</div><div style={{fontSize:10,color:T.textSec}}>Habits heute</div></div>
+      </div>
+      {dailyTotal>0&&<div style={{marginTop:12}}><Bar pct={dailyTotal>0?Math.round(dailyDone/dailyTotal*100):0} color={dailyDone===dailyTotal?T.green:T.accent} h={4}/></div>}
+    </div>
+
+    {/* Per-Goal Streaks grouped by Category */}
+    {allGoals.length>0&&(()=>{
+      const byCat={};allGoals.forEach(g=>{const k=g.category_id;if(!byCat[k])byCat[k]=[];byCat[k].push(g)});
+      return Object.entries(byCat).map(([cid,goals])=>{
+        const col=catColor(cid);const cn=goals[0]?.cat_name||catName(cid);
+        return<div key={cid} style={{marginBottom:16}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+            <div style={{width:10,height:10,borderRadius:3,background:col}}/>
+            <span style={{fontWeight:700,fontSize:14}}>{cn}</span>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:8}}>
+            {goals.map(g=>{
+              const done=g.done_today>0;const s30=parseInt(g.streak_30d)||0;
+              const freq=g.frequency==='daily'?'T':g.frequency==='weekly'?'W':'M';
+              return<div key={g.id} style={{...S.card,padding:"12px 14px",borderLeft:"3px solid "+col}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <span style={{fontSize:11,color:T.textSec,background:T.bg,padding:"3px 8px",borderRadius:4,fontWeight:600}}>{freq}</span>
+                  {done&&<span style={{fontSize:14,color:T.green}}>{"\u2713"}</span>}
+                </div>
+                <div style={{fontSize:14,fontWeight:600,marginBottom:6,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{g.title}</div>
+                <div style={{display:"flex",alignItems:"baseline",gap:4}}>
+                  <span style={{fontSize:26,fontWeight:700,color:s30>20?T.green:s30>10?T.blue:s30>5?T.orange:T.textMuted}}>{s30}</span>
+                  <span style={{fontSize:12,color:T.textSec}}>/30d</span>
+                </div>
+              </div>
+            })}
+          </div>
+        </div>})
+    })()}
+
+    {allGoals.length===0&&<div style={S.card}><Empty icon={"\u{1F4CB}"} title="Dashboard leer" sub="Erstelle Goals mit Frequenz im Goals-Tab"/></div>}
+  </div>
+}
+
+/* ============ GOALS ============ */
+function GoalsTab({goals,categories,entries,catColor,catName,setSGM,setEG,deleteGoal,togGoal,setSEM,loadData,isMobile,setMenuOpen}){
+  const[fC,setFC]=useState("all");const[fS,setFS]=useState("all");const[exG,setExG]=useState(null);const[exT,setExT]=useState(null);
+  const fl=goals.filter(g=>(fC==="all"||g.category_id==fC)&&(fS==="all"||(fS==="active"&&g.progress<100)||(fS==="done"&&g.progress>=100)));
+  const reorder=async(newList)=>{await api.post('reorder',{table:'goals',ids:newList.map(g=>g.id)});loadData()};
+  const canDrag=fC==='all'&&fS==='all';
+  const{dragIdx,overIdx,onDS,onDO,onDE}=useDrag(fl,reorder);
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Goals" icon={"\u{1F3AF}"} isMobile={isMobile} setMenuOpen={setMenuOpen}><button onClick={()=>setSGM(true)} style={S.btn()}>+ Neues Goal</button></PageHeader>
+    <div style={{display:"flex",gap:8,marginBottom:16}}><select value={fC} onChange={e=>setFC(e.target.value)} style={{...S.sel,flex:1}}><option value="all">Alle Kategorien</option>{categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><select value={fS} onChange={e=>setFS(e.target.value)} style={{...S.sel,flex:1}}><option value="all">Alle</option><option value="active">Aktiv</option><option value="done">Erledigt</option></select></div>
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+    {fl.length===0?<div style={S.card}><Empty icon={"\u{1F3AF}"} title="Keine Goals" sub="Erstelle dein erstes Goal!"/></div>:fl.map((g,i)=>{
+      const c=catColor(g.category_id),done=g.progress>=100,isT=g.goal_type==='tracking',dl=g.deadline?daysLeft(g.deadline):null;
+      const logM=entries.filter(e=>e.goal_id==g.id).reduce((s,e)=>s+(e.minutes||0),0);
+      const isDrag=dragIdx===i;const isOver=overIdx===i;
+      return<div key={g.id} onDragOver={canDrag?e=>onDO(e,i):undefined} onDragEnd={canDrag?onDE:undefined} style={{...S.card,opacity:done?.6:isDrag?.4:1,borderLeft:"3px solid "+c,borderTop:isOver?"2px solid "+T.accent:undefined,transition:"opacity .2s"}}>
+        <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+          {canDrag&&<DragHandle onDS={onDS} idx={i}/>}
+          <div style={{flex:1}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:6}}>
+              <span style={S.badge(c)}>{catName(g.category_id)}</span>
+              {isT&&<span style={S.badge(T.teal)}>{"\u{1F4CA}"} Tracking</span>}
+              {g.frequency&&g.frequency!=='once'&&<span style={S.badge(freqColors[g.frequency]||T.textSec)}>{freqIcon[g.frequency]||''} {freqLabel[g.frequency]||g.frequency}</span>}
+              {done&&<span style={S.badge(T.green)}>{"\u2713"}</span>}
+              {dl!==null&&!done&&<span style={S.badge(dl<=3?T.accent:dl<=7?T.orange:T.textSec)}>{dl}d</span>}
+            </div>
+            <div style={{fontSize:17,fontWeight:700,textDecoration:done?"line-through":"none"}}>{g.title}</div>
+          </div>
+          <button onClick={()=>togGoal(g.id)} style={{...S.btnO(),padding:"6px 10px",fontSize:16}}>{done?"\u21A9":"\u2713"}</button>
+        </div>
+        <div style={{marginTop:10}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}><span style={{fontSize:13,color:T.textSec}}>Fortschritt</span><span style={{fontSize:12,fontWeight:700,color:c}}>{g.progress}%</span></div><Bar pct={g.progress} color={c}/>
+          {!isT&&g.target_minutes>0&&<div style={{fontSize:11,color:T.textMuted,marginTop:4}}>{fmtMins(logM)} / {fmtMins(g.target_minutes)}</div>}
+          {isT&&g.tracking_target&&<div style={{fontSize:11,color:T.textMuted,marginTop:4}}>Ziel: {g.tracking_target} {g.tracking_unit}</div>}
+        </div>
+        <div style={{display:"flex",gap:6,marginTop:12,flexWrap:"wrap"}}>
+          {!isT&&<button onClick={()=>setSEM(true)} style={S.btnSm(T.blue)}>+ Zeit</button>}
+          {isT&&<button onClick={()=>setExT(exT===g.id?null:g.id)} style={S.btnSm(T.teal)}>{exT===g.id?"\u25B2":"\u25BC"} Track</button>}
+          <button onClick={()=>setExG(exG===g.id?null:g.id)} style={S.btnO()}>SMART</button>
+          <button onClick={()=>{setEG(g);setSGM(true)}} style={S.btnO()}>{"\u270E"}</button>
+          <button onClick={()=>{if(confirm("Löschen?"))deleteGoal(g.id)}} style={S.btnO(T.accent)}>{"\u2715"}</button>
+        </div>
+        {exT===g.id&&<TrackingPanel goal={g} loadData={loadData}/>}
+        {exG===g.id&&g.smart&&<div style={{marginTop:14,padding:14,background:T.bg,borderRadius:12,display:"flex",flexDirection:"column",gap:10}}>{Object.entries(smartLabels).map(([k,m])=>g.smart[k]?<div key={k} style={{display:"flex",gap:10}}><span style={{fontSize:18}}>{m.i}</span><div><div style={{fontSize:11,fontWeight:700,color:T.textSec}}>{m.l}</div><div style={{fontSize:13,lineHeight:1.5}}>{g.smart[k]}</div></div></div>:null)}</div>}
+      </div>})}
+    </div>
+  </div>
+}
+
+/* ============ ERFASSUNG ============ */
+function ErfassungTab({entries,categories,labels,catColor,catName,setSEM,setEditEntry,deleteEntry,loadData,isMobile,setMenuOpen}){
+  const td=new Date().toISOString().slice(0,10);
+  const[blocks,setBlocks]=useState([]);const[showAdd,setShowAdd]=useState(false);
+  const[bC,setBC]=useState("");const[bL,setBL]=useState("");const[bS,setBS]=useState("");const[bE,setBE]=useState("");
+  const[selDate,setSD]=useState(td);const[editBlock,setEB]=useState(null);
+  const[filterCat,setFC]=useState("all");const[logging,setLog]=useState(null);
+  const[sel,setSel]=useState(new Set());
+
+  const loadBlocks=async()=>{const r=await api.get('settings');if(r&&!r.error&&r.time_blocks)try{
+    let bl=JSON.parse(r.time_blocks);
+    // Migrate old name→label
+    let changed=false;bl=bl.map(b=>{if(b.name&&!b.label){changed=true;return{...b,label:b.name,name:undefined}}return b});
+    if(changed)await api.put('settings',{key:'time_blocks',value:JSON.stringify(bl)});
+    setBlocks(bl);
+  }catch(e){}};
+  useEffect(()=>{loadBlocks()},[]);
+  const saveBlocks=async(newB)=>{setBlocks(newB);await api.put('settings',{key:'time_blocks',value:JSON.stringify(newB)})};
+
+  const addBlock=()=>{
+    if(!bL.trim()||!bC)return;
+    const b={label:bL.trim(),categoryId:parseInt(bC),startTime:bS||null,endTime:bE||null};
+    if(editBlock!==null){const nb=[...blocks];nb[editBlock]=b;saveBlocks(nb)}
+    else saveBlocks([...blocks,b]);
+    setBL("");setBC("");setBS("");setBE("");setShowAdd(false);setEB(null);
+  };
+  const delBlock=i=>{if(confirm('Löschen?')){const nb=blocks.filter((_,j)=>j!==i);saveBlocks(nb)}};
+  const editB=(i,e)=>{e.stopPropagation();const b=blocks[i];setBL(b.label||b.name||"");setBC(String(b.categoryId));setBS(b.startTime||"");setBE(b.endTime||"");setEB(i);setShowAdd(true)};
+
+  const logBlock=async(b,i)=>{
+    setLog(i);
+    const lbl=b.label||b.name||'';
+    const data={categoryId:b.categoryId,goalId:null,label:lbl,startTime:b.startTime||null,endTime:b.endTime||null,note:'',entryDate:selDate,endDate:selDate,minutes:0};
+    if(b.startTime&&b.endTime){
+      let s=new Date(selDate+'T'+b.startTime);let e=new Date(selDate+'T'+b.endTime);
+      if(e<=s){e.setDate(e.getDate()+1);data.endDate=e.toISOString().slice(0,10)}
+      data.minutes=Math.round((e-s)/60000);
+    }
+    await api.post('entries',data);
+    setLog('done-'+i);setTimeout(()=>setLog(null),800);loadData();
+  };
+
+  const toggleSel=id=>{const n=new Set(sel);if(n.has(id))n.delete(id);else n.add(id);setSel(n)};
+  const bulkDel=async()=>{if(!sel.size||!confirm(sel.size+' Einträge löschen?'))return;await api.post('entries/bulk-delete',{ids:[...sel]});setSel(new Set());loadData()};
+
+  const sorted=[...entries].sort((a,b)=>b.entry_date.localeCompare(a.entry_date)||((b.start_time||'').localeCompare(a.start_time||'')));
+  const grouped={};sorted.forEach(e=>{const d=e.entry_date;if(!grouped[d])grouped[d]=[];grouped[d].push(e)});
+  const prevDay=()=>{const d=new Date(selDate+'T12:00:00');d.setDate(d.getDate()-1);setSD(d.toISOString().slice(0,10))};
+  const nextDay=()=>{const d=new Date(selDate+'T12:00:00');d.setDate(d.getDate()+1);if(d.toISOString().slice(0,10)<=td)setSD(d.toISOString().slice(0,10))};
+  const isToday=selDate===td;
+  const isYesterday=(()=>{const y=new Date();y.setDate(y.getDate()-1);return selDate===y.toISOString().slice(0,10)})();
+  const dateLbl=isToday?"Heute":isYesterday?"Gestern":new Date(selDate+'T12:00:00').toLocaleDateString('de-CH',{weekday:'short',day:'numeric',month:'short'});
+
+  // Group blocks by category for display
+  const catBlocks={};blocks.forEach((b,i)=>{const k=b.categoryId;if(!catBlocks[k])catBlocks[k]=[];catBlocks[k].push({...b,idx:i})});
+  const catIds=filterCat==="all"?Object.keys(catBlocks):[filterCat];
+  const blockCats=[...new Set(blocks.map(b=>b.categoryId))];
+
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Erfassung" icon={"\u23F1"} isMobile={isMobile} setMenuOpen={setMenuOpen}/>
+
+    {/* Date nav */}
+    <div style={{...S.card,display:"flex",alignItems:"center",gap:8,padding:"10px 16px",marginBottom:16}}>
+      <button onClick={prevDay} style={{background:"none",border:"none",color:T.textSec,fontSize:22,cursor:"pointer",padding:"4px 8px"}}>{"\u25C0"}</button>
+      <div style={{flex:1,textAlign:"center"}}>
+        <div style={{fontSize:18,fontWeight:700,color:isToday?T.green:isYesterday?T.orange:T.text}}>{dateLbl}</div>
+        {!isToday&&<div style={{fontSize:13,color:T.textMuted}}>{selDate}</div>}
+      </div>
+      <button onClick={nextDay} disabled={isToday} style={{background:"none",border:"none",color:isToday?T.border:T.textSec,fontSize:22,cursor:isToday?"default":"pointer",padding:"4px 8px"}}>{"\u25B6"}</button>
+      {!isToday&&<button onClick={()=>setSD(td)} style={{...S.btnSm(T.green),padding:"4px 10px",fontSize:12}}>Heute</button>}
+      <button onClick={()=>{setEditEntry(null);setSEM(true)}} style={{...S.btnO(T.blue),padding:"6px 12px"}}>+ Manuell</button>
+    </div>
+
+    {/* BAUSTEINE */}
+    <div style={{marginBottom:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <span style={{fontWeight:700,fontSize:14}}>{"\u{1F9F1}"} Bausteine</span>
+        <button onClick={()=>{setEB(null);setBL("");setBC(categories[0]?.id?String(categories[0].id):"");setBS("");setBE("");setShowAdd(!showAdd)}} style={S.btnSm(T.blue)}>{showAdd?"\u2715":"+"}</button>
+      </div>
+
+      {showAdd&&<div style={{...S.card,marginBottom:12,padding:14}}>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+          <div><div style={S.lbl}>KATEGORIE</div><select style={S.sel} value={bC} onChange={e=>setBC(e.target.value)}>{categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+          <div><div style={S.lbl}>LABEL *</div><input style={S.inp} value={bL} onChange={e=>setBL(e.target.value)} placeholder="z.B. Arbeit, Pendeln..." autoFocus/></div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+          <div><div style={S.lbl}>VON</div><input type="time" style={S.inp} value={bS} onChange={e=>setBS(e.target.value)}/></div>
+          <div><div style={S.lbl}>BIS</div><input type="time" style={S.inp} value={bE} onChange={e=>setBE(e.target.value)}/></div>
+        </div>
+        <button onClick={addBlock} disabled={!bL.trim()||!bC} style={{...S.btn(T.green),opacity:bL.trim()&&bC?1:.4,width:"100%"}}>{editBlock!==null?"Speichern":"Erstellen"}</button>
+      </div>}
+
+      {blocks.length===0&&!showAdd&&<div style={{...S.card,padding:"16px 20px",textAlign:"center",color:T.textSec,fontSize:13}}>Erstelle Bausteine für schnelles Loggen</div>}
+
+      {/* Category filter tabs */}
+      {blockCats.length>1&&<div style={{display:"flex",gap:4,marginBottom:10,flexWrap:"wrap"}}>
+        <button onClick={()=>setFC("all")} style={{...(filterCat==="all"?S.btnSm(T.blue):S.btnO(T.textSec)),fontSize:12,padding:"5px 12px"}}>Alle</button>
+        {blockCats.map(cid=><button key={cid} onClick={()=>setFC(String(cid))} style={{...(filterCat===String(cid)?S.btnSm(catColor(cid)):S.btnO(catColor(cid))),fontSize:12,padding:"5px 12px"}}>{catName(cid)}</button>)}
+      </div>}
+
+      {/* Blocks grouped by category */}
+      {catIds.map(cid=>{const bs=catBlocks[cid];if(!bs)return null;const col=catColor(cid);
+        return<div key={cid} style={{marginBottom:12}}>
+          {filterCat==="all"&&<div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+            <div style={{width:8,height:8,borderRadius:2,background:col}}/>
+            <span style={{fontSize:15,fontWeight:700,color:T.textSec}}>{catName(cid)}</span>
+          </div>}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:6}}>
+            {bs.map(b=>{
+              const dur=b.startTime&&b.endTime?(()=>{let s=new Date('2000-01-01T'+b.startTime);let e=new Date('2000-01-01T'+b.endTime);if(e<=s)e.setDate(e.getDate()+1);return fmtMins(Math.round((e-s)/60000))})():null;
+              const isL=logging===b.idx;const isDone=logging==='done-'+b.idx;
+              return<div key={b.idx} style={{background:isDone?T.green+"18":T.card,border:"1px solid "+(isDone?T.green:T.border),borderLeft:"4px solid "+(isDone?T.green:col),borderRadius:10,padding:"10px 12px",cursor:isL?"wait":"pointer",opacity:isL?.5:1,transition:"all .3s"}} onClick={()=>!isL&&!isDone&&logBlock(b,b.idx)}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontWeight:700,fontSize:15}}>{b.label||b.name}</span>
+                  {isDone&&<span style={{color:T.green,fontSize:16}}>{"\u2713"}</span>}
+                </div>
+                {b.startTime&&b.endTime&&<div style={{fontSize:14,color:isDone?T.green:T.blue,marginTop:2}}>{b.startTime}–{b.endTime} · {dur}</div>}
+                {!isDone&&<div style={{display:"flex",justifyContent:"flex-end",gap:4,marginTop:4}} onClick={e=>e.stopPropagation()}>
+                  <button onClick={e=>editB(b.idx,e)} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:10,padding:2}}>{"\u270E"}</button>
+                  <button onClick={e=>{e.stopPropagation();delBlock(b.idx)}} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:10,padding:2}}>{"\u2715"}</button>
+                </div>}
+              </div>
+            })}
+          </div>
+        </div>})}
+    </div>
+
+    {/* Bulk actions bar */}
+    {sel.size>0&&<div style={{...S.card,padding:"10px 16px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",border:"1px solid "+T.accent}}>
+      <span style={{fontSize:14,fontWeight:700}}>{sel.size} ausgewählt</span>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={()=>setSel(new Set())} style={S.btnO(T.textSec)}>Abbrechen</button>
+        <button onClick={bulkDel} style={S.btn(T.accent)}>Löschen</button>
+      </div>
+    </div>}
+
+    {/* Entry list */}
+    {sorted.length===0?<div style={S.card}><Empty icon={"\u23F1"} title="Keine Einträge" sub="Tippe auf einen Baustein"/></div>
+    :Object.entries(grouped).map(([d,de])=>{
+      const dt=de.reduce((s,e)=>s+(e.minutes||0),0);
+      const allSel=de.every(e=>sel.has(e.id));
+      const toggleAll=()=>{const n=new Set(sel);if(allSel)de.forEach(e=>n.delete(e.id));else de.forEach(e=>n.add(e.id));setSel(n)};
+      return<div key={d} style={{marginBottom:16}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 0",marginBottom:6,borderBottom:"1px solid "+T.border}}>
+          <input type="checkbox" checked={allSel} onChange={toggleAll} style={{width:16,height:16,accentColor:T.accent,cursor:"pointer"}}/>
+          <span style={{fontSize:15,fontWeight:700,flex:1}}>{fmtDate(d)}</span>
+          <span style={{fontSize:14,fontWeight:700,color:T.accent}}>{fmtMins(dt)}</span>
+        </div>
+        {de.map(e=>{const col=catColor(e.category_id);const isSel=sel.has(e.id);
+          const sameDay=!e.end_date||e.end_date===e.entry_date;
+          const ts=e.start_time&&e.end_time?(sameDay?e.start_time.slice(0,5)+'–'+e.end_time.slice(0,5):e.start_time.slice(0,5)+' → '+fmtDate(e.end_date)+' '+e.end_time.slice(0,5)):null;
+          return<div key={e.id} style={{background:isSel?T.accent+"12":T.card,border:"1px solid "+(isSel?T.accent:T.border),borderLeft:"4px solid "+col,borderRadius:10,padding:"8px 12px",marginBottom:3,display:"flex",alignItems:"center",gap:10}}>
+            <input type="checkbox" checked={isSel} onChange={()=>toggleSel(e.id)} style={{width:16,height:16,accentColor:T.accent,cursor:"pointer",flexShrink:0}}/>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                {e.label&&<span style={{fontSize:15,fontWeight:700,color:T.text}}>{e.label}</span>}
+                <span style={{fontSize:13,color:col,fontWeight:600}}>{catName(e.category_id)}</span>
+                <span style={{fontWeight:600,fontSize:14,color:T.textSec}}>{fmtMins(e.minutes)}</span>
+              </div>
+              {ts&&<div style={{fontSize:13,color:T.blue,marginTop:1,fontVariantNumeric:"tabular-nums"}}>{ts}</div>}
+              {e.note&&<div style={{fontSize:12,color:T.textMuted,marginTop:1}}>{e.note}</div>}
+            </div>
+            <button onClick={()=>{setEditEntry(e);setSEM(true)}} style={{background:"none",border:"none",color:T.textMuted,cursor:"pointer",fontSize:13,padding:4}}>{"\u270E"}</button>
+          </div>})}
+      </div>})}
+  </div>
+}
+
+/* ============ TRACKING ============ */
+function TrackingTab({catColor,catName,loadData,isMobile,setMenuOpen}){
+  const todayStr=new Date().toISOString().slice(0,10);
+  const yesterdayStr=new Date(Date.now()-864e5).toISOString().slice(0,10);
+  const[dash,setDash]=useState({goals:[]});const[sub,setSub]=useState("daily");
+  const[selDate,setSelDate]=useState(todayStr);
+  const[habitNote,setHN]=useState({});const[showNote,setSN]=useState({});
+
+  const load=async()=>{const res=await api.get('dashboard?date='+selDate);if(res&&!res.error)setDash(res)};
+  useEffect(()=>{load();setHN({});setSN({})},[selDate]);
+
+  const logHabit=async(goalId,done,note)=>{
+    await api.post('habits/log',{goalId,done:done?1:0,note:note||'',logDate:selDate});load();loadData();
+  };
+  const saveNote=async(goalId,note)=>{
+    await api.post('habits/note',{goalId,note:note||'',logDate:selDate});load();
+  };
+
+  const isToday=selDate===todayStr;const isYesterday=selDate===yesterdayStr;
+  const dateLbl=isToday?"Heute":isYesterday?"Gestern":new Date(selDate+'T12:00:00').toLocaleDateString('de-CH',{weekday:'short',day:'numeric',month:'short'});
+
+  const grouped={daily:[],weekly:[],monthly:[]};
+  (dash.goals||[]).forEach(g=>{if(grouped[g.frequency])grouped[g.frequency].push(g)});
+  const list=grouped[sub]||[];
+
+  const subs=[{k:"daily",l:"\u{1F504} Täglich",count:grouped.daily.length},{k:"weekly",l:"\u{1F4C5} Wöchentlich",count:grouped.weekly.length},{k:"monthly",l:"\u{1F4C6} Monatlich",count:grouped.monthly.length}];
+
+  const prevDay=()=>{const d=new Date(selDate+'T12:00:00');d.setDate(d.getDate()-1);setSelDate(d.toISOString().slice(0,10))};
+  const nextDay=()=>{const d=new Date(selDate+'T12:00:00');d.setDate(d.getDate()+1);const n=d.toISOString().slice(0,10);if(n<=todayStr)setSelDate(n)};
+
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Tracking" icon={"\u{1F504}"} isMobile={isMobile} setMenuOpen={setMenuOpen}/>
+
+    {/* Date Navigation */}
+    <div style={{...S.card,padding:"10px 16px",marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+      <button onClick={prevDay} style={{...S.btnO(),padding:"6px 12px",fontSize:18}}>{"\u25C0"}</button>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:18,fontWeight:700,color:isToday?T.green:isYesterday?T.orange:T.text}}>{dateLbl}</div>
+          {!isToday&&!isYesterday&&<div style={{fontSize:10,color:T.textSec}}>{selDate}</div>}
+        </div>
+        {!isToday&&<button onClick={()=>setSelDate(todayStr)} style={{...S.btnSm(T.green),fontSize:10,padding:"4px 10px"}}>Heute</button>}
+      </div>
+      <button onClick={nextDay} disabled={isToday} style={{...S.btnO(),padding:"6px 12px",fontSize:18,opacity:isToday?.3:1}}>{"\u25B6"}</button>
+    </div>
+
+    <div style={{display:"flex",gap:6,marginBottom:16}}>
+      {subs.map(s=><button key={s.k} onClick={()=>setSub(s.k)} style={{...(sub===s.k?S.btn(T.green):S.btnO(T.green)),fontSize:12,flex:1}}>{s.l} ({s.count})</button>)}
+    </div>
+
+    {list.length===0&&<div style={S.card}><Empty icon={"\u{1F504}"} title={"Keine Goals"} sub="Erstelle Goals mit der passenden Frequenz im Goals-Tab"/></div>}
+
+    {/* DAILY */}
+    {sub==="daily"&&list.map(g=>{
+      const done=g.done_today>0;const col=catColor(g.category_id);const s30=parseInt(g.streak_30d)||0;
+      const hasNote=g.today_note||habitNote[g.id];
+      return<div key={g.id} style={{marginBottom:10}}>
+        <div onClick={()=>{if(!done)logHabit(g.id,true,'');else logHabit(g.id,false,'')}} style={{...S.card,padding:"14px 18px",borderLeft:"4px solid "+(done?T.green:col),cursor:"pointer",background:done?T.green+"08":T.card}}>
+          <div style={{display:"flex",alignItems:"center",gap:14}}>
+            <div style={{width:44,height:44,borderRadius:12,border:"2.5px solid "+(done?T.green:T.border),background:done?T.green+"22":"transparent",display:"flex",alignItems:"center",justifyContent:"center",color:T.green,fontSize:22,flexShrink:0}}>{done?"\u2713":""}</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:700,fontSize:15,color:done?T.green:T.text,textDecoration:done?"line-through":"none"}}>{g.title}</div>
+              <div style={{fontSize:11,color:T.textSec,marginTop:2}}>{g.cat_name}{g.target_per_period?' · Ziel: '+g.target_per_period+(g.tracking_unit?' '+g.tracking_unit:'')+'/Tag':''}</div>
+            </div>
+            <div style={{textAlign:"right",flexShrink:0}}>
+              <div style={{fontSize:22,fontWeight:700,color:s30>20?T.green:s30>10?T.blue:T.textMuted}}>{s30}</div>
+              <div style={{fontSize:10,color:T.textMuted}}>/ 30d</div>
+            </div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:6,padding:"6px 18px 0"}}>
+          <button onClick={e=>{e.stopPropagation();setSN(p=>({...p,[g.id]:!p[g.id]}));if(!showNote[g.id]&&g.today_note&&!habitNote[g.id])setHN(p=>({...p,[g.id]:g.today_note}))}} style={{...S.btnO(hasNote?T.blue:T.textMuted),padding:"3px 8px",fontSize:10}}>{showNote[g.id]?"\u25B2":"\u{1F4DD}"} {hasNote?"Notiz bearbeiten":"Notiz"}</button>
+        </div>
+        {!showNote[g.id]&&g.today_note&&<div style={{fontSize:12,color:T.textSec,padding:"4px 18px"}}>{"\u{1F4DD}"} {g.today_note}</div>}
+        {showNote[g.id]&&<div style={{display:"flex",gap:6,padding:"6px 18px 0"}}>
+          <input style={{...S.inp,fontSize:12,padding:"6px 10px",flex:1}} placeholder="Notiz..." value={habitNote[g.id]??g.today_note??''} onChange={e=>setHN(p=>({...p,[g.id]:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter'){saveNote(g.id,habitNote[g.id]??'');setSN(p=>({...p,[g.id]:false}))}}}/>
+          <button onClick={()=>{saveNote(g.id,habitNote[g.id]??'');setSN(p=>({...p,[g.id]:false}))}} style={S.btnSm(T.blue)}>{"\u{1F4BE}"}</button>
+        </div>}
+      </div>
+    })}
+
+    {/* WEEKLY */}
+    {sub==="weekly"&&list.map(g=>{
+      const col=catColor(g.category_id);const done=g.done_today>0;
+      const doneW=parseInt(g.done_this_week)||0;const minsW=parseInt(g.mins_this_week)||0;
+      const target=g.target_per_period?parseFloat(g.target_per_period):7;
+      const pct=g.goal_type==='time'&&g.target_minutes?Math.min(100,Math.round(minsW/g.target_minutes*100)):Math.min(100,Math.round(doneW/target*100));
+      return<div key={g.id} style={{...S.card,padding:"14px 18px",marginBottom:10,borderLeft:"4px solid "+col}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
+          <button onClick={()=>logHabit(g.id,!done,'')} style={{width:40,height:40,borderRadius:10,border:"2.5px solid "+(done?T.green:T.border),background:done?T.green+"22":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:T.green,fontSize:18,flexShrink:0,fontFamily:"inherit"}}>{done?"\u2713":"+"}</button>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:700,fontSize:15}}>{g.title}</div>
+            <div style={{fontSize:11,color:T.textSec}}>{g.cat_name}{g.target_per_period?' · Ziel: '+g.target_per_period+(g.tracking_unit?' '+g.tracking_unit:'')+'/Wo':''}</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            {g.goal_type==='time'&&minsW>0&&<div style={{fontSize:13,fontWeight:700,color:T.blue}}>{fmtMins(minsW)}</div>}
+            <div style={{fontSize:15,fontWeight:700,color:pct>=100?T.green:col}}>{doneW}x</div>
+            <div style={{fontSize:9,color:T.textSec}}>diese Woche</div>
+          </div>
+        </div>
+        <Bar pct={pct} color={pct>=100?T.green:col}/>
+        {done&&<div style={{fontSize:10,color:T.green,marginTop:6}}>{"\u2713"} {dateLbl} erledigt</div>}
+        <div style={{fontSize:11,color:T.textMuted,marginTop:4}}>{"\u{1F525}"} {parseInt(g.streak_30d)||0}x in 30 Tagen</div>
+      </div>
+    })}
+
+    {/* MONTHLY */}
+    {sub==="monthly"&&list.map(g=>{
+      const col=catColor(g.category_id);const done=g.done_today>0;
+      const doneM=parseInt(g.done_this_month)||0;const minsM=parseInt(g.mins_this_month)||0;
+      return<div key={g.id} style={{...S.card,padding:"14px 18px",marginBottom:10,borderLeft:"4px solid "+col}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
+          <button onClick={()=>logHabit(g.id,!done,'')} style={{width:40,height:40,borderRadius:10,border:"2.5px solid "+(done?T.green:T.border),background:done?T.green+"22":"transparent",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:T.green,fontSize:18,flexShrink:0,fontFamily:"inherit"}}>{done?"\u2713":"+"}</button>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:700,fontSize:15}}>{g.title}</div>
+            <div style={{fontSize:11,color:T.textSec}}>{g.cat_name}</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            {g.goal_type==='time'&&minsM>0&&<div style={{fontSize:13,fontWeight:700,color:T.blue}}>{fmtMins(minsM)}</div>}
+            <div style={{fontSize:15,fontWeight:700,color:col}}>{doneM}x</div>
+            <div style={{fontSize:9,color:T.textSec}}>diesen Monat</div>
+          </div>
+        </div>
+        <Bar pct={g.progress} color={col}/>
+        {done&&<div style={{fontSize:10,color:T.green,marginTop:6}}>{"\u2713"} {dateLbl} erledigt</div>}
+        <div style={{fontSize:11,color:T.textMuted,marginTop:4}}>{"\u{1F525}"} {parseInt(g.streak_30d)||0}x in 30 Tagen</div>
+      </div>
+    })}
+  </div>
+}
+/* ============ STATS ============ */
+function StatsTab({catStats,catColor,goals,entries,weekData,isMobile,setMenuOpen}){
+  const totalMins=entries.reduce((s,e)=>s+(e.minutes||0),0);
+  const dG=goals.filter(g=>g.progress>=100).length;
+  const uD=new Set(entries.map(e=>e.entry_date)).size;const avg=uD>0?Math.round(totalMins/uD):0;
+  const last7=[];for(let i=6;i>=0;i--){const d=new Date();d.setDate(d.getDate()-i);last7.push(d.toISOString().slice(0,10))}
+  const maxD=Math.max(1,...last7.map(d=>(weekData||[]).filter(w=>w.entry_date===d).reduce((s,w)=>s+w.total_mins,0)));
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Statistik" icon={"\u{1F4CA}"} isMobile={isMobile} setMenuOpen={setMenuOpen}/>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:16}}>
+      {[{v:goals.length>0?Math.round(dG/goals.length*100)+"%":"—",l:"GOALS",c:T.green},{v:fmtMins(totalMins),l:"TOTAL",c:T.blue},{v:avg>0?fmtMins(avg):"—",l:"Ø/TAG",c:T.orange}].map(s=><div key={s.l} style={{...S.card,textAlign:"center",padding:"16px 10px"}}><div style={{fontSize:22,fontWeight:700,color:s.c}}>{s.v}</div><div style={{fontSize:10,fontWeight:700,color:T.textSec,marginTop:4}}>{s.l}</div></div>)}
+    </div>
+    <div style={{...S.card,marginBottom:16}}><div style={S.lbl}>WOCHENÜBERSICHT</div>
+      <div style={{display:"flex",gap:4,height:140,alignItems:"flex-end",marginTop:12}}>
+        {last7.map(d=>{const de=(weekData||[]).filter(w=>w.entry_date===d);const dt=de.reduce((s,w)=>s+w.total_mins,0);const bH=Math.max(2,dt/maxD*100);const isT=d===new Date().toISOString().slice(0,10);
+          return<div key={d} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+            <div style={{fontSize:10,color:T.textMuted,fontWeight:600}}>{dt>0?fmtMins(dt):""}</div>
+            <div style={{width:"100%",display:"flex",flexDirection:"column-reverse",height:110,gap:1}}>
+              {de.length>0?de.map((w,i)=>{const sH=dt>0?w.total_mins/dt*bH:0;return<div key={i} style={{width:"100%",height:sH+"%",background:catColor(w.category_id),borderRadius:i===de.length-1?"4px 4px 0 0":0,minHeight:sH>0?2:0}}/>}):<div style={{width:"100%",height:"2%",background:T.border,borderRadius:4}}/>}
+            </div>
+            <div style={{fontSize:10,color:isT?T.accent:T.textSec,fontWeight:isT?700:400}}>{fmtDateShort(d)}</div>
+          </div>})}
+      </div>
+    </div>
+    <div style={S.card}><div style={S.lbl}>KATEGORIEN</div>{catStats.map(c=>{const col=catColor(c.id);const p=totalMins>0?(c.total_mins/totalMins*100).toFixed(1):"0";
+      return<div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:"1px solid "+T.border}}><div style={{width:12,height:12,borderRadius:4,background:col}}/><div style={{flex:1}}><div style={{fontWeight:600,fontSize:15}}>{c.name}</div><div style={{fontSize:11,color:T.textMuted}}>{c.goal_count} Goals</div></div><div style={{textAlign:"right"}}><div style={{fontWeight:700,fontSize:14,color:col}}>{fmtMins(c.total_mins)}</div><div style={{fontSize:11,color:T.textSec}}>{p}%</div></div></div>})}</div>
+  </div>
+}
+
+/* ============ AUSWERTUNGEN ============ */
+function AuswertungenTab({catColor,catName,entries,isMobile,setMenuOpen}){
+  return<TimeStatsTab catColor={catColor} catName={catName} entries={entries} isMobile={isMobile} setMenuOpen={setMenuOpen}/>
+}
+
+/* ============ LIFE MATRIX ============ */
+function MatrixTab({categories,loadData,isMobile,setMenuOpen}){
+  const[values,setValues]=useState([]);const[matrix,setMatrix]=useState([]);const[tqi,setTqi]=useState(0);
+  const[showAdd,setShowAdd]=useState(false);const[editV,setEditV]=useState(null);
+  const[aName,setAN]=useState("");const[aCat,setAC]=useState("");const[aImp,setAI]=useState(5);const[aSat,setAS]=useState(5);const[aIdeal,setAH]=useState("");
+  const[saving,setSaving]=useState(false);const[errMsg,setErrMsg]=useState("");
+
+  const load=async()=>{
+    const v=await api.get('life-values');setValues(Array.isArray(v)?v:[]);
+    const m=await api.get('life-matrix');if(m&&!m.error){setMatrix(m.matrix||[]);setTqi(m.tqi||0)}
+  };
+  useEffect(()=>{load()},[]);
+
+  const save=async()=>{
+    if(!aName.trim())return;
+    setSaving(true);setErrMsg("");
+    const d={areaName:aName.trim(),categoryId:aCat?parseInt(aCat):null,importance:parseInt(aImp),satisfaction:parseInt(aSat),idealHoursWeek:parseFloat(aIdeal)||0};
+    const r=editV?await api.put('life-values/'+editV.id,d):await api.post('life-values',d);
+    setSaving(false);
+    if(r&&r.error){setErrMsg(r.error);return}
+    setShowAdd(false);setEditV(null);setAN("");setAC("");setAI(5);setAS(5);setAH("");load();
+  };
+  const startEdit=v=>{setEditV(v);setAN(v.area_name);setAC(v.category_id||"");setAI(v.importance);setAS(v.satisfaction);setAH(String(v.ideal_hours_week||""));setErrMsg("");setShowAdd(true)};
+  const del=async id=>{if(confirm("Löschen?")){await api.del('life-values/'+id);load()}};
+
+  const maxImp=Math.max(10,...matrix.map(m=>m.importance_pct));
+  const maxTime=Math.max(10,...matrix.map(m=>m.time_pct));
+  const tqiColor=tqi>=80?T.green:tqi>=60?T.orange:T.accent;
+
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Life Matrix" icon={"\u{1F9ED}"} isMobile={isMobile} setMenuOpen={setMenuOpen}><button onClick={()=>{setEditV(null);setAN("");setAC("");setAI(5);setAS(5);setAH("");setErrMsg("");setShowAdd(true)}} style={S.btn(T.purple)}>+ Bereich</button></PageHeader>
+    <div style={{...S.card,textAlign:"center",marginBottom:16}}>
+      <div style={{fontSize:11,fontWeight:700,color:T.textSec,letterSpacing:2,marginBottom:8}}>TIME QUALITY INDEX</div>
+      <div style={{fontSize:56,fontWeight:700,color:tqiColor}}>{tqi}</div>
+      <div style={{fontSize:12,color:T.textMuted,marginTop:4,marginBottom:8}}>Wie gut passt deine Zeit zu deinen Werten?</div>
+      <Bar pct={tqi} color={tqiColor} h={8}/>
+    </div>
+    {matrix.length>0&&<div style={{...S.card,marginBottom:16}}>
+      <div style={S.lbl}>WERTE vs. ZEIT</div>
+      <div style={{position:"relative",height:250,background:T.bg,borderRadius:12,border:"1px solid "+T.border,overflow:"hidden",marginTop:10}}>
+        <div style={{position:"absolute",left:"50%",top:0,bottom:0,width:1,background:T.border+"88"}}/>
+        <div style={{position:"absolute",top:"50%",left:0,right:0,height:1,background:T.border+"88"}}/>
+        <div style={{position:"absolute",top:6,left:10,fontSize:9,color:T.accent,fontWeight:700}}>{"\u26A0"} Mehr Zeit</div>
+        <div style={{position:"absolute",top:6,right:10,fontSize:9,color:T.green,fontWeight:700}}>{"\u2713"} Aligned</div>
+        <div style={{position:"absolute",bottom:6,right:10,fontSize:9,color:T.orange,fontWeight:700}}>{"\u26A0"} Reduzieren</div>
+        {matrix.map((m,i)=>{
+          const x=Math.max(5,Math.min(95,maxTime>0?m.time_pct/maxTime*80+10:50));
+          const y=Math.max(5,Math.min(95,100-(maxImp>0?m.importance_pct/maxImp*80+10:50)));
+          const col=T.colors[i%T.colors.length];
+          return<div key={m.id} style={{position:"absolute",left:x+"%",top:y+"%",transform:"translate(-50%,-50%)",zIndex:2}} title={m.area_name+': '+m.importance_pct+'% Wichtigkeit, '+m.time_pct+'% Zeit'}>
+            <div style={{width:36,height:36,borderRadius:"50%",background:col+"33",border:"3px solid "+col,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#fff",fontWeight:700}}>{m.area_name.slice(0,2).toUpperCase()}</div>
+          </div>
+        })}
+      </div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:12}}>{matrix.map((m,i)=><span key={m.id} style={S.badge(T.colors[i%T.colors.length])}>{m.area_name}</span>)}</div>
+    </div>}
+    {matrix.length===0?<div style={S.card}><Empty icon={"\u{1F9ED}"} title="Keine Lebensbereiche" sub="Bereiche hinzufügen und mit Kategorien verknüpfen"/></div>
+    :matrix.map((m,i)=>{
+      const col=T.colors[i%T.colors.length];
+      const gC=m.gap>15?T.accent:m.gap<-15?T.orange:T.green;
+      const gL=m.gap>15?"\u26A0 Mehr Zeit investieren":m.gap<-15?"\u26A0 Evtl. reduzieren":"\u2713 Aligned";
+      return<div key={m.id} style={{...S.card,borderLeft:"3px solid "+col,marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div><div style={{fontWeight:700,fontSize:16}}>{m.area_name}</div>{m.cat_name&&<div style={{fontSize:11,color:T.textSec}}>{"→"} {m.cat_name}</div>}</div>
+          <div style={{display:"flex",gap:4}}><button onClick={()=>startEdit(values.find(v=>v.id==m.id))} style={S.btnO()}>{"\u270E"}</button><button onClick={()=>del(m.id)} style={S.btnO(T.accent)}>{"\u2715"}</button></div>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:10}}>
+          {[{v:m.importance,l:"Wichtigkeit"},{v:m.satisfaction,l:"Zufriedenheit"},{v:m.actual_hours_week+"h",l:"Ist/Wo",c:T.blue},{v:m.ideal_hours_week+"h",l:"Soll/Wo",c:T.green}].map(x=><div key={x.l} style={{textAlign:"center",padding:8,background:T.bg,borderRadius:10}}><div style={{fontSize:22,fontWeight:700,color:x.c||T.text}}>{x.v}</div><div style={{fontSize:9,color:T.textSec,marginTop:2}}>{x.l}</div></div>)}
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={S.badge(gC)}>{gL}</span><span style={{fontSize:12,color:T.textMuted}}>Gap: {(m.gap>0?"+":"")+m.gap}%</span></div>
+      </div>
+    })}
+    <Modal open={showAdd} onClose={()=>{setShowAdd(false);setEditV(null)}} title={editV?"Bereich bearbeiten":"Neuer Lebensbereich"}>
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        <div><div style={S.lbl}>NAME</div><input style={S.inp} value={aName} onChange={e=>setAN(e.target.value)} placeholder="z.B. Gesundheit, Familie..." autoFocus/></div>
+        <div><div style={S.lbl}>MIT KATEGORIE VERKNÜPFEN</div><select style={S.sel} value={aCat} onChange={e=>setAC(e.target.value)}><option value="">{"—"} Keine</option>{categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><div style={{fontSize:11,color:T.textMuted,marginTop:4}}>Erfasste Zeiten werden automatisch zugeordnet</div></div>
+        <div><div style={S.lbl}>WICHTIGKEIT (1-10)</div><div style={{display:"flex",alignItems:"center",gap:12}}><input type="range" min="1" max="10" value={aImp} onChange={e=>setAI(+e.target.value)} style={{flex:1,accentColor:T.accent}}/><span style={{fontSize:22,fontWeight:700,color:T.accent,minWidth:30,textAlign:"center"}}>{aImp}</span></div></div>
+        <div><div style={S.lbl}>ZUFRIEDENHEIT (1-10)</div><div style={{display:"flex",alignItems:"center",gap:12}}><input type="range" min="1" max="10" value={aSat} onChange={e=>setAS(+e.target.value)} style={{flex:1,accentColor:T.green}}/><span style={{fontSize:22,fontWeight:700,color:T.green,minWidth:30,textAlign:"center"}}>{aSat}</span></div></div>
+        <div><div style={S.lbl}>IDEALE STUNDEN / WOCHE</div><input type="number" step="0.5" style={S.inp} value={aIdeal} onChange={e=>setAH(e.target.value)} placeholder="z.B. 10"/></div>
+        {errMsg&&<div style={{color:T.accent,fontSize:13,textAlign:"center"}}>{errMsg}</div>}
+        <button onClick={save} disabled={!aName.trim()||saving} style={{...S.btn(T.purple),opacity:aName.trim()&&!saving?1:.4}}>{saving?"...":editV?"Speichern":"Hinzufügen"}</button>
+      </div>
+    </Modal>
+  </div>
+}
+
+/* ============ BUDGET ============ */
+function BudgetTab({categories,goals,loadData,isMobile,setMenuOpen}){
+  const[budgets,setBudgets]=useState([]);const[summary,setSummary]=useState([]);
+  const[showAdd,setShowAdd]=useState(false);const[editB,setEditB]=useState(null);
+  const[selBudget,setSelBudget]=useState(null);const[budgetDash,setBD]=useState(null);
+  const[expanded,setExpanded]=useState(null);const[bEntries,setBEntries]=useState({});
+  const[view,setView]=useState("list");
+  const[bName,setBN]=useState("");const[bCat,setBC]=useState("");const[bGoal,setBG]=useState("");
+  const[bCur,setBCur]=useState("CHF");const[bAmt,setBA]=useState("");const[bPeriod,setBP]=useState("monthly");
+  const[eAmt,setEA]=useState("");const[eType,setET]=useState("expense");const[eNote,setEN]=useState("");const[eDate,setED]=useState(new Date().toISOString().slice(0,10));
+  const[eCatId,setECatId]=useState("");
+  const[editCat,setEditCat]=useState(null);const[ecName,setECN]=useState("");const[ecY,setECY]=useState("");const[ecM,setECM]=useState("");
+
+  const load=async()=>{const b=await api.get('budgets');setBudgets(Array.isArray(b)?b:[]);const s=await api.get('budget-summary');setSummary(Array.isArray(s)?s:[])};
+  useEffect(()=>{load()},[]);
+  const loadBD=async(id)=>{const d=await api.get('budgets/'+id+'/dashboard');if(d&&!d.error)setBD(d)};
+  const loadEntries=async(budgetId)=>{const e=await api.get('budgets/'+budgetId+'/entries');setBEntries(p=>({...p,[budgetId]:Array.isArray(e)?e:[]}))};
+
+  const saveBudget=async()=>{
+    if(!bName.trim()||!bAmt)return;
+    const d={name:bName.trim(),categoryId:bCat?parseInt(bCat):null,goalId:bGoal?parseInt(bGoal):null,currency:bCur,budgetAmount:parseFloat(bAmt),period:bPeriod};
+    if(editB)await api.put('budgets/'+editB.id,d);else await api.post('budgets',d);
+    setShowAdd(false);setEditB(null);setBN("");setBC("");setBG("");setBA("");load();loadData();
+  };
+  const initTemplate=async(id)=>{await api.post('budgets/'+id+'/init-template',{});loadBD(id)};
+  const addEntry=async(budgetId)=>{
+    if(!eAmt)return;
+    await api.post('budgets/'+budgetId+'/entries',{amount:parseFloat(eAmt),entryType:eType,note:eNote.trim(),entryDate:eDate,budgetCategoryId:eCatId?parseInt(eCatId):null});
+    setEA("");setEN("");setECatId("");load();loadData();if(selBudget)loadBD(selBudget.id)};
+  const delEntry=async(entryId,budgetId)=>{await api.del('budget-entries/'+entryId);load();if(selBudget)loadBD(selBudget.id)};
+  const updateBCat=async()=>{if(!editCat)return;await api.put('budget-categories/'+editCat.id,{name:ecName,budgetYearly:parseFloat(ecY)||0,budgetMonthly:parseFloat(ecM)||0,isIncome:editCat.is_income});setEditCat(null);loadBD(selBudget.id)};
+
+  const fC=(a,c)=>{const n=parseFloat(a)||0;return n.toLocaleString('de-CH',{minimumFractionDigits:0,maximumFractionDigits:0})+(c?' '+c:'')};
+
+  // Budget list view
+  if(!selBudget)return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Budget" icon={"\u{1F4B0}"} isMobile={isMobile} setMenuOpen={setMenuOpen}>
+      <button onClick={()=>{setEditB(null);setBN("");setBC("");setBG("");setBCur("CHF");setBA("");setBP("yearly");setShowAdd(true)}} style={S.btn(T.teal)}>+ Budget</button>
+    </PageHeader>
+    {budgets.length===0?<div style={S.card}><Empty icon={"\u{1F4B0}"} title="Kein Budget" sub="Erstelle ein Jahresbudget mit CH-Vorlage"/></div>
+    :budgets.map(b=>{const spent=parseFloat(b.total_expenses)||0;const budget=parseFloat(b.budget_amount)||1;const pct=Math.min(100,Math.round(spent/budget*100));
+      return<div key={b.id} style={{...S.card,borderLeft:"3px solid "+T.teal,marginBottom:12,cursor:"pointer"}} onClick={()=>{setSelBudget(b);loadBD(b.id)}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <div><div style={{fontWeight:700,fontSize:16}}>{b.name}</div><div style={{display:"flex",gap:6,marginTop:4}}><span style={S.badge(T.teal)}>{b.currency}</span><span style={S.badge(T.blue)}>{b.period==='yearly'?'Jährlich':'Monatlich'}</span></div></div>
+          <button onClick={e=>{e.stopPropagation();if(confirm("Budget löschen?")){api.del('budgets/'+b.id).then(()=>{load();loadData()})}}} style={S.btnO(T.accent)}>{"\u2715"}</button>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:12,color:T.textSec}}>Ausgaben</span><span style={{fontSize:12,fontWeight:700,color:pct>100?T.accent:T.green}}>{fC(spent,b.currency)} / {fC(budget,b.currency)}</span></div>
+        <Bar pct={pct} color={pct>100?T.accent:pct>80?T.orange:T.green}/>
+      </div>})}
+    <Modal open={showAdd} onClose={()=>{setShowAdd(false);setEditB(null)}} title={editB?"Budget bearbeiten":"Neues Budget"}>
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div><div style={S.lbl}>NAME</div><input style={S.inp} value={bName} onChange={e=>setBN(e.target.value)} placeholder="z.B. Jahresbudget 2026" autoFocus/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div><div style={S.lbl}>WÄHRUNG</div><select style={S.sel} value={bCur} onChange={e=>setBCur(e.target.value)}><option value="CHF">CHF</option><option value="EUR">EUR</option><option value="USD">USD</option></select></div>
+          <div><div style={S.lbl}>TOTAL BUDGET</div><input type="number" style={S.inp} value={bAmt} onChange={e=>setBA(e.target.value)} placeholder="z.B. 51295"/></div>
+        </div>
+        <div><div style={S.lbl}>ZEITRAUM</div><select style={S.sel} value={bPeriod} onChange={e=>setBP(e.target.value)}><option value="yearly">Jährlich</option><option value="monthly">Monatlich</option></select></div>
+        <div><div style={S.lbl}>GOAL VERKNÜPFEN</div><select style={S.sel} value={bGoal} onChange={e=>setBG(e.target.value)}><option value="">{"—"} Kein</option>{goals.map(g=><option key={g.id} value={g.id}>{g.title}</option>)}</select></div>
+        <button onClick={saveBudget} disabled={!bName.trim()||!bAmt} style={{...S.btn(T.teal),opacity:bName.trim()&&bAmt?1:.4}}>Erstellen</button>
+      </div>
+    </Modal>
+  </div>;
+
+  // Budget Dashboard
+  const cats=budgetDash?.categories||[];
+  const parents=cats.filter(c=>!c.parent_id);
+  const children=pid=>cats.filter(c=>c.parent_id==pid);
+  const cur=selBudget.currency||'CHF';
+  const totalY=cats.filter(c=>!c.is_income).reduce((s,c)=>s+parseFloat(c.budget_yearly||0),0);
+  const totalM=cats.filter(c=>!c.is_income).reduce((s,c)=>s+parseFloat(c.budget_monthly||0),0);
+  const totalActExp=cats.reduce((s,c)=>s+parseFloat(c.actual_expense||0),0);
+  const totalActInc=cats.reduce((s,c)=>s+parseFloat(c.actual_income||0),0);
+
+  return<div style={{animation:"fadeIn .3s"}}>
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:16}}>
+      <button onClick={()=>{setSelBudget(null);setBD(null)}} style={{...S.btnO(),padding:"8px 12px"}}>{"\u2190"}</button>
+      <span style={{fontSize:28}}>{"\u{1F4B0}"}</span>
+      <h2 style={{margin:0,fontSize:22,fontWeight:700}}>{selBudget.name}</h2>
+    </div>
+
+    {/* Overview */}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:16}}>
+      <div style={{...S.card,textAlign:"center",padding:"12px 8px"}}><div style={{fontSize:16,fontWeight:700,color:T.teal}}>{fC(totalY,cur)}</div><div style={{fontSize:9,color:T.textSec}}>SOLL/Jahr</div></div>
+      <div style={{...S.card,textAlign:"center",padding:"12px 8px"}}><div style={{fontSize:16,fontWeight:700,color:T.blue}}>{fC(totalM,cur)}</div><div style={{fontSize:9,color:T.textSec}}>SOLL/Mt</div></div>
+      <div style={{...S.card,textAlign:"center",padding:"12px 8px"}}><div style={{fontSize:16,fontWeight:700,color:T.accent}}>{fC(totalActExp,cur)}</div><div style={{fontSize:9,color:T.textSec}}>IST Ausg.</div></div>
+      <div style={{...S.card,textAlign:"center",padding:"12px 8px"}}><div style={{fontSize:16,fontWeight:700,color:T.green}}>{fC(totalActInc,cur)}</div><div style={{fontSize:9,color:T.textSec}}>IST Einn.</div></div>
+    </div>
+
+    {/* Sub nav */}
+    <div style={{display:"flex",gap:6,marginBottom:16}}>{[{k:"template",l:"Vorlage"},{k:"entry",l:"Buchen"},{k:"compare",l:"Ist/Soll"}].map(n=><button key={n.k} onClick={()=>setView(n.k)} style={{...view===n.k?S.btn(T.teal):S.btnO(T.teal),fontSize:12}}>{n.l}</button>)}</div>
+
+    {cats.length===0&&<div style={{...S.card,marginBottom:16,textAlign:"center"}}>
+      <div style={{fontSize:14,color:T.textSec,marginBottom:12}}>CH-Budgetvorlage laden?</div>
+      <button onClick={()=>initTemplate(selBudget.id)} style={S.btn(T.teal)}>Vorlage laden</button>
+    </div>}
+
+    {/* TEMPLATE VIEW */}
+    {view==="template"&&cats.length>0&&<div>
+      {parents.map(p=>{const kids=children(p.id);const isInc=p.is_income;const pY=kids.length>0?kids.reduce((s,c)=>s+parseFloat(c.budget_yearly||0),0):parseFloat(p.budget_yearly||0);const pM=kids.length>0?kids.reduce((s,c)=>s+parseFloat(c.budget_monthly||0),0):parseFloat(p.budget_monthly||0);
+        return<div key={p.id} style={{marginBottom:12}}>
+          <div style={{background:isInc?T.green+"22":T.teal+"22",padding:"10px 14px",borderRadius:"10px 10px 0 0",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontWeight:700,fontSize:14,color:isInc?T.green:T.teal}}>{p.name}</span>
+            <div style={{display:"flex",gap:16,fontSize:12,fontWeight:700}}>
+              <span style={{color:T.textSec}}>Jährlich: {fC(pY,cur)}</span>
+              <span style={{color:T.text}}>Monatlich: {fC(pM,cur)}</span>
+            </div>
+          </div>
+          {kids.map(c=><div key={c.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 14px 8px 28px",borderBottom:"1px solid "+T.border,background:T.card,cursor:"pointer"}} onClick={()=>{setEditCat(c);setECN(c.name);setECY(String(c.budget_yearly||""));setECM(String(c.budget_monthly||""))}}>
+            <span style={{fontSize:13,color:T.text}}>{c.name}</span>
+            <div style={{display:"flex",gap:16,fontSize:12}}>
+              <span style={{color:T.textSec,minWidth:80,textAlign:"right"}}>{fC(c.budget_yearly,'')||'-'}</span>
+              <span style={{fontWeight:600,minWidth:60,textAlign:"right"}}>{fC(c.budget_monthly,'')||'-'}</span>
+            </div>
+          </div>)}
+          {kids.length===0&&<div style={{display:"flex",justifyContent:"space-between",padding:"8px 14px 8px 28px",borderBottom:"1px solid "+T.border,background:T.card,cursor:"pointer"}} onClick={()=>{setEditCat(p);setECN(p.name);setECY(String(p.budget_yearly||""));setECM(String(p.budget_monthly||""))}}>
+            <span style={{fontSize:12,color:T.textMuted}}>Betrag anpassen</span>
+            <div style={{display:"flex",gap:16,fontSize:12}}>
+              <span style={{color:T.textSec,minWidth:80,textAlign:"right"}}>{fC(p.budget_yearly,'')||'-'}</span>
+              <span style={{fontWeight:600,minWidth:60,textAlign:"right"}}>{fC(p.budget_monthly,'')||'-'}</span>
+            </div>
+          </div>}
+        </div>})}
+      <div style={{display:"flex",justifyContent:"space-between",padding:"12px 14px",background:T.accent+"22",borderRadius:10,marginTop:8}}>
+        <span style={{fontWeight:700}}>Total Ausgaben</span>
+        <div style={{display:"flex",gap:16,fontSize:13,fontWeight:700}}><span>{fC(totalY,cur)}</span><span>{fC(totalM,cur)}/Mt</span></div>
+      </div>
+    </div>}
+
+    {/* ENTRY VIEW */}
+    {view==="entry"&&<div>
+      <div style={{...S.card,marginBottom:12}}>
+        <div style={{...S.lbl,marginBottom:10}}>NEUE BUCHUNG</div>
+        <div style={{display:"flex",gap:6,marginBottom:8,flexWrap:"wrap"}}>
+          <select value={eType} onChange={e=>setET(e.target.value)} style={{...S.sel,width:120,fontSize:12,padding:"8px 10px"}}><option value="expense">{"\u{1F534}"} Ausgabe</option><option value="income">{"\u{1F7E2}"} Einnahme</option></select>
+          <select value={eCatId} onChange={e=>setECatId(e.target.value)} style={{...S.sel,flex:1,minWidth:140,fontSize:12,padding:"8px 10px"}}><option value="">Kategorie...</option>{cats.filter(c=>c.parent_id).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>
+        </div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          <input type="number" step="0.01" style={{...S.inp,fontSize:13,padding:"8px 10px",flex:1,minWidth:80}} value={eAmt} onChange={e=>setEA(e.target.value)} placeholder={"Betrag "+cur}/>
+          <input style={{...S.inp,fontSize:13,padding:"8px 10px",flex:1,minWidth:80}} value={eNote} onChange={e=>setEN(e.target.value)} placeholder="Notiz"/>
+          <input type="date" style={{...S.inp,fontSize:12,padding:"8px 10px",width:130}} value={eDate} onChange={e=>setED(e.target.value)}/>
+          <button onClick={()=>addEntry(selBudget.id)} style={S.btn(T.teal)}>Buchen</button>
+        </div>
+      </div>
+    </div>}
+
+    {/* COMPARE VIEW */}
+    {view==="compare"&&cats.length>0&&<div>
+      {parents.filter(p=>!p.is_income).map(p=>{const kids=children(p.id);
+        return<div key={p.id} style={{marginBottom:12}}>
+          <div style={{background:T.teal+"22",padding:"8px 14px",borderRadius:"8px 8px 0 0",fontWeight:700,fontSize:13,color:T.teal}}>{p.name}</div>
+          {(kids.length>0?kids:[p]).map(c=>{const bM=parseFloat(c.budget_monthly||0);const actM=parseFloat(c.month_expense||0);const diff=bM-actM;const pct=bM>0?Math.min(150,Math.round(actM/bM*100)):0;
+            return<div key={c.id} style={{padding:"6px 14px 6px 28px",borderBottom:"1px solid "+T.border,background:T.card}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                <span style={{fontSize:12}}>{c.name}</span>
+                <div style={{display:"flex",gap:12,fontSize:11}}>
+                  <span style={{color:T.textSec}}>Soll: {fC(bM,'')}</span>
+                  <span style={{fontWeight:700,color:actM>0?T.accent:T.textMuted}}>Ist: {fC(actM,'')}</span>
+                  <span style={{fontWeight:700,color:diff>=0?T.green:T.accent}}>{diff>=0?'+':''}{fC(diff,'')}</span>
+                </div>
+              </div>
+              {bM>0&&<Bar pct={pct} color={pct>100?T.accent:pct>80?T.orange:T.green} h={4}/>}
+            </div>})}
+        </div>})}
+    </div>}
+
+    {/* Edit Category Modal */}
+    <Modal open={!!editCat} onClose={()=>setEditCat(null)} title="Betrag anpassen">
+      {editCat&&<div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div><div style={S.lbl}>KATEGORIE</div><input style={S.inp} value={ecName} onChange={e=>setECN(e.target.value)}/></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div><div style={S.lbl}>JÄHRLICH</div><input type="number" style={S.inp} value={ecY} onChange={e=>setECY(e.target.value)}/></div>
+          <div><div style={S.lbl}>MONATLICH</div><input type="number" style={S.inp} value={ecM} onChange={e=>setECM(e.target.value)}/></div>
+        </div>
+        <button onClick={updateBCat} style={S.btn(T.teal)}>Speichern</button>
+      </div>}
+    </Modal>
+  </div>
+}
+
+/* ============ GOAL STATS ============ */
+const freqLabel={daily:"Täglich",weekly:"Wöchentlich",monthly:"Monatlich",yearly:"Jährlich",once:"Einmalig"};
+const freqIcon={daily:"\u{1F504}",weekly:"\u{1F4C5}",monthly:"\u{1F4C6}",yearly:"\u{1F389}",once:"\u{1F3AF}"};
+const freqColors={daily:T.accent,weekly:T.blue,monthly:T.purple,yearly:T.orange,once:T.textSec};
+
+// Period helpers
+const getWeekRange=(off)=>{const d=new Date();const day=d.getDay()||7;d.setDate(d.getDate()-day+1+(off*7));const f=new Date(d);const t=new Date(d);t.setDate(t.getDate()+6);return{from:f.toISOString().slice(0,10),to:t.toISOString().slice(0,10)}};
+const getMonthRange=(off)=>{const d=new Date();d.setMonth(d.getMonth()+off,1);const f=d.toISOString().slice(0,10);const e=new Date(d.getFullYear(),d.getMonth()+1,0);return{from:f,to:e.toISOString().slice(0,10)}};
+const getYearRange=(off)=>{const y=new Date().getFullYear()+off;return{from:y+'-01-01',to:y+'-12-31'}};
+const getDayRange=(off)=>{const d=new Date();d.setDate(d.getDate()+off);const s=d.toISOString().slice(0,10);return{from:s,to:s}};
+const getKW=(ds)=>{const d=new Date(ds+'T12:00:00');d.setDate(d.getDate()+3-(d.getDay()+6)%7);const w1=new Date(d.getFullYear(),0,4);return 1+Math.round(((d-w1)/864e5-3+(w1.getDay()+6)%7)/7)};
+const periodLbl=(p,from,to)=>{if(p==='day'){const d=new Date(from+'T12:00:00');return d.toLocaleDateString('de-CH',{weekday:'long',day:'numeric',month:'long'})}if(p==='week')return'KW '+getKW(from)+' ('+fmtDateShort(from)+' – '+fmtDateShort(to)+')';if(p==='month'){const d=new Date(from+'T12:00:00');return d.toLocaleDateString('de-CH',{month:'long',year:'numeric'})}return from.slice(0,4)};
+const prevLbl=(p)=>p==='day'?'Gestern':p==='week'?'Letzte Woche':p==='month'?'Letzter Monat':'Letztes Jahr';
+
+function PeriodSelector({period,setPeriod,offset,setOffset,color}){
+  const r=period==='day'?getDayRange(offset):period==='week'?getWeekRange(offset):period==='month'?getMonthRange(offset):getYearRange(offset);
+  return<div style={{...S.card,padding:"12px 16px",marginBottom:16}}>
+    <div style={{display:"flex",gap:5,marginBottom:10,flexWrap:"wrap"}}>
+      {['day','week','month','year'].map(p=><button key={p} onClick={()=>{setPeriod(p);setOffset(0)}} style={{...period===p?S.btn(color):S.btnO(color),fontSize:11,padding:"6px 12px"}}>{p==='day'?'Tag':p==='week'?'Woche':p==='month'?'Monat':'Jahr'}</button>)}
+    </div>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <button onClick={()=>setOffset(offset-1)} style={{...S.btnO(),padding:"6px 14px",fontSize:18}}>{"\u2190"}</button>
+      <span style={{fontWeight:700,fontSize:14}}>{periodLbl(period,r.from,r.to)}</span>
+      <button onClick={()=>setOffset(Math.min(0,offset+1))} disabled={offset>=0} style={{...S.btnO(),padding:"6px 14px",fontSize:18,opacity:offset>=0?.3:1}}>{"→"}</button>
+    </div>
+  </div>
+}
+
+function GoalStatsTab({catColor,isMobile,setMenuOpen}){
+  const[period,setPeriod]=useState('week');const[offset,setOffset]=useState(0);
+  const[data,setData]=useState({goals:[],habitDaily:[]});
+
+  const rangeFor=(p,o)=>p==='day'?getDayRange(o):p==='week'?getWeekRange(o):p==='month'?getMonthRange(o):getYearRange(o);
+
+  useEffect(()=>{
+    const r=rangeFor(period,offset),pr=rangeFor(period,offset-1);
+    api.get('goal-stats?from='+r.from+'&to='+r.to+'&prevFrom='+pr.from+'&prevTo='+pr.to).then(d=>{if(d&&!d.error)setData(d)});
+  },[period,offset]);
+
+  const goals=data.goals||[];const hDaily=data.habitDaily||[];
+  const byFreq={};goals.forEach(g=>{const f=g.frequency||'once';if(!byFreq[f])byFreq[f]=[];byFreq[f].push(g)});
+  const total=goals.length;const done=goals.filter(g=>g.progress>=100).length;
+  const totalComp=goals.reduce((s,g)=>s+parseInt(g.completions||0),0);
+  const prevComp=goals.reduce((s,g)=>s+parseInt(g.prev_completions||0),0);
+  const compDiff=totalComp-prevComp;
+  const totalMins=goals.reduce((s,g)=>s+parseInt(g.period_minutes||0),0);
+  const prevMins=goals.reduce((s,g)=>s+parseInt(g.prev_minutes||0),0);
+  const minsDiff=totalMins-prevMins;
+
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Goal Statistik" icon={"\u{1F4C8}"} isMobile={isMobile} setMenuOpen={setMenuOpen}/>
+    <PeriodSelector {...{period,setPeriod,offset,setOffset}} color="#e74c6c"/>
+
+    {/* Summary */}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:16}}>
+      <div style={{...S.card,textAlign:"center",padding:"12px 6px"}}><div style={{fontSize:22,fontWeight:700,color:T.green}}>{total>0?Math.round(done/total*100):0}%</div><div style={{fontSize:9,color:T.textSec}}>ERLEDIGT</div></div>
+      <div style={{...S.card,textAlign:"center",padding:"12px 6px"}}>
+        <div style={{fontSize:22,fontWeight:700,color:T.blue}}>{totalComp}</div><div style={{fontSize:9,color:T.textSec}}>CHECKS</div>
+        {prevComp>0&&<div style={{fontSize:10,fontWeight:700,color:compDiff>=0?T.green:T.accent,marginTop:2}}>{compDiff>=0?'+':''}{compDiff}</div>}
+      </div>
+      <div style={{...S.card,textAlign:"center",padding:"12px 6px"}}>
+        <div style={{fontSize:22,fontWeight:700,color:T.accent}}>{fmtMins(totalMins)}</div><div style={{fontSize:9,color:T.textSec}}>ZEIT</div>
+        {prevMins>0&&<div style={{fontSize:10,fontWeight:700,color:minsDiff>=0?T.green:T.accent,marginTop:2}}>{minsDiff>=0?'+':''}{fmtMins(Math.abs(minsDiff))}</div>}
+      </div>
+      <div style={{...S.card,textAlign:"center",padding:"12px 6px"}}><div style={{fontSize:22,fontWeight:700,color:T.purple}}>{goals.filter(g=>g.frequency==='daily').length}</div><div style={{fontSize:9,color:T.textSec}}>HABITS</div></div>
+    </div>
+
+    {/* Habit heatmap */}
+    {hDaily.length>0&&<div style={{...S.card,marginBottom:16}}>
+      <div style={S.lbl}>HABIT-AKTIVITÄT</div>
+      <div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:8}}>
+        {hDaily.map((d,i)=>{const cnt=parseInt(d.cnt||0);const mx=Math.max(1,...hDaily.map(x=>parseInt(x.cnt||0)));const op=Math.max(0.15,cnt/mx);
+          return<div key={i} style={{width:period==='year'?8:period==='month'?16:24,height:period==='year'?8:period==='month'?16:24,borderRadius:3,background:T.green,opacity:op}} title={d.log_date+': '+cnt+'x'}/>})}
+      </div>
+    </div>}
+
+    {/* Goals by frequency */}
+    {Object.entries(byFreq).map(([freq,gs])=><div key={freq} style={{marginBottom:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}><span style={{fontSize:20}}>{freqIcon[freq]||"\u{1F3AF}"}</span><span style={{fontWeight:700,fontSize:15}}>{freqLabel[freq]||freq}</span><span style={{fontSize:12,color:T.textSec}}>({gs.length})</span></div>
+      {gs.map(g=>{const col=catColor(g.category_id);const pct=g.progress||0;const comp=parseInt(g.completions||0);const prevC=parseInt(g.prev_completions||0);const cdiff=comp-prevC;const pM=parseInt(g.period_minutes||0);const pvM=parseInt(g.prev_minutes||0);
+        return<div key={g.id} style={{...S.card,padding:"12px 16px",marginBottom:8,borderLeft:"3px solid "+col}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+            <div style={{flex:1}}><div style={{fontWeight:700,fontSize:14}}>{g.title}</div><div style={{fontSize:11,color:T.textSec}}>{g.cat_name||"—"}</div></div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontWeight:700,fontSize:16,color:pct>=100?T.green:col}}>{pct}%</div>
+              <div style={{fontSize:10,color:T.textSec}}>{comp}x{cdiff!==0&&<span style={{color:cdiff>0?T.green:T.accent,marginLeft:4}}>({cdiff>0?'+':''}{cdiff})</span>}</div>
+            </div>
+          </div>
+          <Bar pct={pct} color={pct>=100?T.green:col}/>
+          <div style={{display:"flex",gap:8,marginTop:6,fontSize:11,color:T.textMuted,flexWrap:"wrap"}}>
+            {pM>0&&<span>{"\u23F1"} {fmtMins(pM)}{pvM>0&&pM!==pvM&&<span style={{color:pM>pvM?T.green:T.accent}}> ({pM>pvM?'+':''}{fmtMins(Math.abs(pM-pvM))})</span>}</span>}
+            {g.total_completions>0&&<span>Total: {g.total_completions}x</span>}
+          </div>
+        </div>})}
+    </div>)}
+    {goals.length===0&&<div style={S.card}><Empty icon={"\u{1F4C8}"} title="Keine Goal-Daten" sub="Erstelle Goals und tracke sie"/></div>}
+  </div>
+}
+
+/* ============ TIME STATS ============ */
+function Donut({data,size}){
+  const sz=size||120;const r=sz/2;const ir=r*0.6;const cx=r;const cy=r;
+  const total=data.reduce((s,d)=>s+d.value,0);if(!total)return null;
+  let angle=-Math.PI/2;
+  const arcs=data.map(d=>{
+    const pct=d.value/total;const a1=angle;const a2=angle+pct*Math.PI*2;angle=a2;
+    const la=pct>0.5?1:0;
+    const x1=cx+r*Math.cos(a1),y1=cy+r*Math.sin(a1);
+    const x2=cx+r*Math.cos(a2),y2=cy+r*Math.sin(a2);
+    const ix1=cx+ir*Math.cos(a2),iy1=cy+ir*Math.sin(a2);
+    const ix2=cx+ir*Math.cos(a1),iy2=cy+ir*Math.sin(a1);
+    return{...d,pct,path:`M${x1},${y1} A${r},${r} 0 ${la} 1 ${x2},${y2} L${ix1},${iy1} A${ir},${ir} 0 ${la} 0 ${ix2},${iy2} Z`};
+  });
+  return<svg width={sz} height={sz} viewBox={`0 0 ${sz} ${sz}`}>
+    {arcs.map((a,i)=><path key={i} d={a.path} fill={a.color} opacity={0.85}><title>{a.label}: {fmtMins(a.value)} ({Math.round(a.pct*100)}%)</title></path>)}
+    <text x={cx} y={cy-6} textAnchor="middle" fill={T.text} fontSize={sz>100?18:14} fontWeight={700}>{fmtMins(total)}</text>
+    <text x={cx} y={cy+12} textAnchor="middle" fill={T.textSec} fontSize={sz>100?11:9}>Total</text>
+  </svg>
+}
+
+function buildTimeline(dayEntries){
+  // Sort entries by start_time
+  const withTime=dayEntries.filter(e=>e.start_time&&e.end_time).map(e=>{
+    const sh=parseInt(e.start_time.slice(0,2)),sm=parseInt(e.start_time.slice(3,5));
+    const eh=parseInt(e.end_time.slice(0,2)),em=parseInt(e.end_time.slice(3,5));
+    let startM=sh*60+sm,endM=eh*60+em;
+    if(endM<=startM)endM=24*60; // overnight: cap at midnight
+    return{...e,startM,endM};
+  }).sort((a,b)=>a.startM-b.startM);
+  if(!withTime.length)return[];
+
+  const blocks=[];
+  const dayStart=withTime[0].startM;
+  const dayEnd=Math.max(...withTime.map(e=>e.endM));
+
+  let cursor=dayStart;
+  withTime.forEach(e=>{
+    if(e.startM>cursor){
+      blocks.push({type:'gap',startM:cursor,endM:e.startM,mins:e.startM-cursor});
+    }
+    blocks.push({type:'entry',...e,mins:e.endM-e.startM});
+    cursor=Math.max(cursor,e.endM);
+  });
+
+  return{blocks,dayStart,dayEnd,totalRange:dayEnd-dayStart};
+}
+
+function TimeStatsTab({catColor,catName:cn,entries,isMobile,setMenuOpen}){
+  const catName=cn||(()=>"—");
+  const[period,setPeriod]=useState('week');const[offset,setOffset]=useState(0);
+  const[data,setData]=useState({byCategory:[],byLabel:[],curTotal:0,prevTotal:0});
+  const[tlDate,setTlDate]=useState(new Date().toISOString().slice(0,10));
+
+  const rangeFor=(p,o)=>p==='day'?getDayRange(o):p==='week'?getWeekRange(o):p==='month'?getMonthRange(o):getYearRange(o);
+
+  useEffect(()=>{
+    const r=rangeFor(period,offset),pr=rangeFor(period,offset-1);
+    api.get('time-stats?from='+r.from+'&to='+r.to+'&prevFrom='+pr.from+'&prevTo='+pr.to).then(d=>{if(d&&!d.error)setData(d)});
+  },[period,offset]);
+
+  const totalMins=parseInt(data.curTotal||0);
+  const prevMins=parseInt(data.prevTotal||0);
+  const diff=totalMins-prevMins;
+  const pctChange=prevMins>0?Math.round((diff/prevMins)*100):0;
+  const catsWithData=data.byCategory.filter(c=>parseInt(c.total_mins||0)>0);
+
+  // Donut data
+  const donutData=catsWithData.map(c=>({value:parseInt(c.total_mins),color:catColor(c.id),label:c.name}));
+
+  // Labels grouped by category
+  const labelByCat={};(data.byLabel||[]).forEach(l=>{const k=l.category_id;if(!labelByCat[k])labelByCat[k]=[];labelByCat[k].push(l)});
+
+  // Timeline for selected date
+  const dayEntries=(entries||[]).filter(e=>e.entry_date===tlDate);
+  const tl=buildTimeline(dayEntries);
+  const fmtT=m=>{const h=Math.floor(m/60);const mm=m%60;return String(h).padStart(2,'0')+':'+String(mm).padStart(2,'0')};
+
+  const td=new Date().toISOString().slice(0,10);
+  const tlPrev=()=>{const d=new Date(tlDate+'T12:00:00');d.setDate(d.getDate()-1);setTlDate(d.toISOString().slice(0,10))};
+  const tlNext=()=>{const d=new Date(tlDate+'T12:00:00');d.setDate(d.getDate()+1);if(d.toISOString().slice(0,10)<=td)setTlDate(d.toISOString().slice(0,10))};
+  const tlIsToday=tlDate===td;
+  const tlLbl=tlIsToday?"Heute":new Date(tlDate+'T12:00:00').toLocaleDateString('de-CH',{weekday:'short',day:'numeric',month:'short'});
+
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Auswertungen" icon={"\u{1F4CA}"} isMobile={isMobile} setMenuOpen={setMenuOpen}/>
+    <PeriodSelector {...{period,setPeriod,offset,setOffset}} color="#2980b9"/>
+
+    {/* Summary */}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:16}}>
+      <div style={{...S.card,textAlign:"center",padding:"14px 8px"}}><div style={{fontSize:24,fontWeight:700,color:T.blue}}>{fmtMins(totalMins)}</div><div style={{fontSize:11,color:T.textSec}}>AKTUELL</div></div>
+      <div style={{...S.card,textAlign:"center",padding:"14px 8px"}}><div style={{fontSize:24,fontWeight:700,color:T.textSec}}>{fmtMins(prevMins)}</div><div style={{fontSize:11,color:T.textSec}}>{prevLbl(period).toUpperCase()}</div></div>
+      <div style={{...S.card,textAlign:"center",padding:"14px 8px"}}><div style={{fontSize:24,fontWeight:700,color:diff>=0?T.green:T.accent}}>{diff>=0?'+':''}{fmtMins(Math.abs(diff))}</div><div style={{fontSize:11,color:diff>=0?T.green:T.accent}}>{pctChange>=0?'+':''}{pctChange}%</div></div>
+    </div>
+
+    {/* Donut + category breakdown */}
+    {donutData.length>0&&<div style={{...S.card,marginBottom:16}}>
+      <div style={S.lbl}>VERTEILUNG NACH KATEGORIE</div>
+      <div style={{display:"flex",gap:20,alignItems:"center",flexWrap:"wrap",marginTop:8}}>
+        <Donut data={donutData} size={140}/>
+        <div style={{flex:1,minWidth:160}}>
+          {catsWithData.map(c=>{
+            const cur=parseInt(c.total_mins||0);const prev=parseInt(c.prev_mins||0);const cdiff=cur-prev;const pct=totalMins>0?Math.round(cur/totalMins*100):0;const col=catColor(c.id);
+            return<div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0"}}>
+              <div style={{width:6,height:22,borderRadius:3,background:col}}/>
+              <div style={{flex:1}}><div style={{fontSize:14,fontWeight:600}}>{c.name}</div></div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:14,fontWeight:700,color:col}}>{fmtMins(cur)} <span style={{fontSize:12,color:T.textSec,fontWeight:400}}>{pct}%</span></div>
+                {prev>0&&cdiff!==0&&<div style={{fontSize:11,color:cdiff>0?T.green:T.accent}}>{cdiff>0?'+':''}{fmtMins(Math.abs(cdiff))}</div>}
+              </div>
+            </div>})}
+        </div>
+      </div>
+    </div>}
+
+    {/* Labels breakdown */}
+    {Object.keys(labelByCat).length>0&&<div style={{...S.card,marginBottom:16}}>
+      <div style={S.lbl}>NACH LABEL</div>
+      {Object.entries(labelByCat).map(([cid,items])=>{
+        const col=catColor(cid);const catTotal=items.reduce((s,l)=>s+parseInt(l.total_mins||0),0);
+        const cn=catsWithData.find(c=>String(c.id)===String(cid))?.name||'';
+        const maxL=Math.max(1,...items.map(l=>parseInt(l.total_mins||0)));
+        return<div key={cid} style={{marginBottom:16}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+            <div style={{width:10,height:10,borderRadius:3,background:col}}/>
+            <span style={{fontSize:14,fontWeight:700}}>{cn}</span>
+            <span style={{fontSize:12,color:T.textSec}}>{fmtMins(catTotal)}</span>
+          </div>
+          {items.map((l,i)=>{const m=parseInt(l.total_mins||0);const pct=catTotal>0?Math.round(m/catTotal*100):0;
+            return<div key={i} style={{marginBottom:6,paddingLeft:18}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                <span style={{fontSize:13,fontWeight:600}}>{l.label}</span>
+                <span style={{fontSize:13,fontWeight:700,color:col}}>{fmtMins(m)} <span style={{fontSize:11,color:T.textSec,fontWeight:400}}>{pct}%</span></span>
+              </div>
+              <div style={{height:6,background:T.border,borderRadius:3,overflow:"hidden"}}>
+                <div style={{width:Math.round(m/maxL*100)+'%',height:'100%',background:col,borderRadius:3,transition:"width .4s"}}/>
+              </div>
+            </div>})}
+        </div>})}
+    </div>}
+
+    {/* Daily Timeline */}
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+        <div style={S.lbl}>TAGES-TIMELINE</div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <button onClick={tlPrev} style={{background:"none",border:"none",color:T.textSec,fontSize:18,cursor:"pointer",padding:"2px 6px"}}>{"\u25C0"}</button>
+          <span style={{fontSize:14,fontWeight:700,color:tlIsToday?T.green:T.text,minWidth:100,textAlign:"center"}}>{tlLbl}</span>
+          <button onClick={tlNext} disabled={tlIsToday} style={{background:"none",border:"none",color:tlIsToday?T.border:T.textSec,fontSize:18,cursor:tlIsToday?"default":"pointer",padding:"2px 6px"}}>{"\u25B6"}</button>
+        </div>
+      </div>
+
+      {tl.blocks&&tl.blocks.length>0?<div>
+        {/* Visual bar */}
+        <div style={{display:"flex",height:32,borderRadius:8,overflow:"hidden",marginBottom:12,border:"1px solid "+T.border}}>
+          {tl.blocks.map((b,i)=>{
+            const w=tl.totalRange>0?(b.mins/tl.totalRange*100):0;
+            if(w<0.5)return null;
+            const col=b.type==='gap'?T.border:catColor(b.category_id);
+            return<div key={i} style={{width:w+'%',height:'100%',background:b.type==='gap'?T.bg:col,display:"flex",alignItems:"center",justifyContent:"center",minWidth:b.type==='gap'?2:4,borderRight:i<tl.blocks.length-1?"1px solid "+T.bg:"none"}} title={(b.type==='gap'?'Lücke':((b.label||catName(b.category_id))))+': '+fmtT(b.startM)+'–'+fmtT(b.endM)}>
+              {w>8&&<span style={{fontSize:10,color:b.type==='gap'?T.textMuted:'#fff',fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",padding:"0 4px"}}>{b.type==='gap'?'':b.label||''}</span>}
+            </div>})}
+        </div>
+
+        {/* Detail list */}
+        {tl.blocks.map((b,i)=>{
+          const col=b.type==='gap'?T.textMuted:catColor(b.category_id);
+          return<div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:i<tl.blocks.length-1?"1px solid "+T.border:"none"}}>
+            <div style={{width:4,height:24,borderRadius:2,background:b.type==='gap'?T.border:col}}/>
+            <span style={{fontSize:13,color:T.blue,fontVariantNumeric:"tabular-nums",minWidth:90}}>{fmtT(b.startM)}–{fmtT(b.endM)}</span>
+            <span style={{fontSize:14,fontWeight:700,color:b.type==='gap'?T.textMuted:T.text,flex:1}}>{b.type==='gap'?'– nicht erfasst –':(b.label||'ohne Label')}</span>
+            {b.type!=='gap'&&<span style={{fontSize:12,color:col,fontWeight:600}}>{catName(b.category_id)}</span>}
+            <span style={{fontSize:13,fontWeight:700,color:b.type==='gap'?T.textMuted:col,minWidth:40,textAlign:"right"}}>{fmtMins(b.mins)}</span>
+          </div>})}
+
+        {/* Summary */}
+        {(()=>{const gapMins=tl.blocks.filter(b=>b.type==='gap').reduce((s,b)=>s+b.mins,0);const tracked=tl.blocks.filter(b=>b.type==='entry').reduce((s,b)=>s+b.mins,0);
+          return gapMins>0?<div style={{display:"flex",justifyContent:"space-between",marginTop:10,padding:"10px 0 0",borderTop:"1px solid "+T.border}}>
+            <span style={{fontSize:13,color:T.textSec}}>Erfasst: <b style={{color:T.green}}>{fmtMins(tracked)}</b></span>
+            <span style={{fontSize:13,color:T.textSec}}>Lücken: <b style={{color:T.accent}}>{fmtMins(gapMins)}</b></span>
+          </div>:null
+        })()}
+      </div>
+      :<div style={{textAlign:"center",padding:"20px 0",color:T.textMuted,fontSize:14}}>Keine Einträge an diesem Tag</div>}
+    </div>
+
+    {totalMins===0&&!tl.blocks?.length&&<div style={S.card}><Empty icon={"\u{1F552}"} title="Keine Daten" sub="Erfasse Zeiten um Statistiken zu sehen"/></div>}
+  </div>
+}
+
+/* ============ LESSONS LEARNED ============ */
+function LessonsTab({categories,isMobile,setMenuOpen}){
+  const[lessons,setLessons]=useState([]);const[showAdd,setShowAdd]=useState(false);const[editL,setEditL]=useState(null);
+  const[lTitle,setLT]=useState("");const[lContent,setLC]=useState("");const[lCat,setLCat]=useState("");const[lDate,setLD]=useState(new Date().toISOString().slice(0,10));
+  const[filter,setFilter]=useState("all");
+  const load=()=>api.get('lessons').then(d=>setLessons(Array.isArray(d)?d:[]));
+  useEffect(()=>{load()},[]);
+  const save=async()=>{
+    if(!lTitle.trim())return;
+    const d={title:lTitle.trim(),content:lContent.trim(),categoryId:lCat?parseInt(lCat):null,entryDate:lDate};
+    if(editL)await api.put('lessons/'+editL.id,d);else await api.post('lessons',d);
+    setShowAdd(false);setEditL(null);setLT("");setLC("");setLCat("");load();
+  };
+  const startEdit=l=>{setEditL(l);setLT(l.title);setLC(l.content||"");setLCat(l.category_id||"");setLD(l.entry_date||new Date().toISOString().slice(0,10));setShowAdd(true)};
+  const del=async id=>{if(confirm("Löschen?")){await api.del('lessons/'+id);load()}};
+  const filtered=filter==="all"?lessons:lessons.filter(l=>l.category_id==filter);
+  const grouped={};filtered.forEach(l=>{const d=l.entry_date;if(!grouped[d])grouped[d]=[];grouped[d].push(l)});
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Lessons Learned" icon={"\u{1F4D6}"} isMobile={isMobile} setMenuOpen={setMenuOpen}>
+      <button onClick={()=>{setEditL(null);setLT("");setLC("");setLCat("");setLD(new Date().toISOString().slice(0,10));setShowAdd(true)}} style={S.btn("#8e44ad")}>+ Lesson</button>
+    </PageHeader>
+    <select value={filter} onChange={e=>setFilter(e.target.value)} style={{...S.sel,marginBottom:16}}><option value="all">Alle Kategorien</option>{categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select>
+    {Object.keys(grouped).length===0?<div style={S.card}><Empty icon={"\u{1F4D6}"} title="Keine Einträge" sub="Halte deine Learnings fest!"/></div>
+    :Object.entries(grouped).sort((a,b)=>b[0].localeCompare(a[0])).map(([d,ls])=><div key={d} style={{marginBottom:16}}>
+      <div style={{fontSize:14,fontWeight:700,marginBottom:8,color:T.text,borderBottom:"1px solid "+T.border,paddingBottom:6}}>{fmtDate(d)}</div>
+      {ls.map(l=><div key={l.id} style={{...S.card,padding:"14px 16px",marginBottom:8,borderLeft:"3px solid #8e44ad"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:700,fontSize:14,marginBottom:4}}>{l.title}</div>
+            {l.cat_name&&<span style={S.badge("#8e44ad")}>{l.cat_name}</span>}
+            {l.content&&<div style={{fontSize:13,color:T.textSec,marginTop:8,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{l.content}</div>}
+          </div>
+          <div style={{display:"flex",gap:4,flexShrink:0,marginLeft:8}}>
+            <button onClick={()=>startEdit(l)} style={S.btnO()}>{"\u270E"}</button>
+            <button onClick={()=>del(l.id)} style={S.btnO(T.accent)}>{"\u2715"}</button>
+          </div>
+        </div>
+      </div>)}
+    </div>)}
+    <Modal open={showAdd} onClose={()=>{setShowAdd(false);setEditL(null)}} title={editL?"Lesson bearbeiten":"Neue Lesson"}>
+      <div style={{display:"flex",flexDirection:"column",gap:14}}>
+        <div><div style={S.lbl}>DATUM</div><input type="date" style={S.inp} value={lDate} onChange={e=>setLD(e.target.value)}/></div>
+        <div><div style={S.lbl}>TITEL</div><input style={S.inp} value={lTitle} onChange={e=>setLT(e.target.value)} placeholder="Was habe ich gelernt?" autoFocus/></div>
+        <div><div style={S.lbl}>KATEGORIE</div><select style={S.sel} value={lCat} onChange={e=>setLCat(e.target.value)}><option value="">{"—"} Keine</option>{categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+        <div><div style={S.lbl}>DETAILS</div><textarea style={{...S.inp,minHeight:120,resize:"vertical"}} value={lContent} onChange={e=>setLC(e.target.value)} placeholder="Beschreibung, Kontext, was ich anders machen werde..."/></div>
+        <button onClick={save} disabled={!lTitle.trim()} style={{...S.btn("#8e44ad"),opacity:lTitle.trim()?1:.4}}>{editL?"Speichern":"Hinzufügen"}</button>
+      </div>
+    </Modal>
+  </div>
+}
+
+/* ============ FITNESS ============ */
+function FitnessTab({isMobile,setMenuOpen,loadData}){
+  const[view,setView]=useState("plans");
+  const[plans,setPlans]=useState([]);const[days,setDays]=useState([]);const[exercises,setExercises]=useState([]);
+  const[sessions,setSessions]=useState([]);const[activeSession,setAS]=useState(null);
+  const[fGoals,setFG]=useState([]);const[selPlan,setSelPlan]=useState(null);const[selDay,setSelDay]=useState(null);
+  const[showAddPlan,setSAP]=useState(false);const[showAddDay,setSAD]=useState(false);const[showAddEx,setSAE]=useState(false);
+  const[showAddGoal,setSAFG]=useState(false);
+  const[pName,setPN]=useState("");const[pDesc,setPD]=useState("");
+  const[dName,setDN]=useState("");const[dFocus,setDF]=useState("");
+  const[eName,setEN]=useState("");const[eSets,setES]=useState("3");const[eReps,setER]=useState("10");const[eWeights,setEW]=useState("");const[eNote,setENt]=useState("");
+  const[fgName,setFGN]=useState("");const[fgType,setFGT]=useState("reps");const[fgTarget,setFGTar]=useState("");const[fgCurrent,setFGC]=useState("0");const[fgUnit,setFGU]=useState("");const[fgDeadline,setFGD]=useState("");
+
+  const loadPlans=()=>api.get('fitness/plans').then(d=>setPlans(Array.isArray(d)?d:[]));
+  const loadDays=pid=>api.get('fitness/plans/'+pid+'/days').then(d=>{setDays(Array.isArray(d)?d:[])});
+  const loadExercises=did=>api.get('fitness/days/'+did+'/exercises').then(d=>setExercises(Array.isArray(d)?d:[]));
+  const loadSessions=()=>api.get('fitness/sessions').then(d=>setSessions(Array.isArray(d)?d:[]));
+  const loadActive=()=>api.get('fitness/sessions/active').then(d=>{if(d&&d.id)setAS(d);else setAS(null)});
+  const loadFGoals=()=>api.get('fitness/goals').then(d=>setFG(Array.isArray(d)?d:[]));
+
+  useEffect(()=>{loadPlans();loadSessions();loadActive();loadFGoals()},[]);
+  useEffect(()=>{if(selPlan)loadDays(selPlan.id)},[selPlan]);
+  useEffect(()=>{if(selDay)loadExercises(selDay.id)},[selDay]);
+
+  const savePlan=async()=>{if(!pName.trim())return;await api.post('fitness/plans',{name:pName.trim(),description:pDesc.trim()});setSAP(false);setPN("");setPD("");loadPlans()};
+  const saveDay=async()=>{if(!dName.trim()||!selPlan)return;await api.post('fitness/plans/'+selPlan.id+'/days',{dayName:dName.trim(),focus:dFocus.trim()});setSAD(false);setDN("");setDF("");loadDays(selPlan.id)};
+  const saveExercise=async()=>{if(!eName.trim()||!selDay)return;await api.post('fitness/days/'+selDay.id+'/exercises',{exerciseName:eName.trim(),targetSets:parseInt(eSets)||3,targetReps:parseInt(eReps)||10,targetWeights:eWeights.trim(),note:eNote.trim()});setSAE(false);setEN("");setES("3");setER("10");setEW("");setENt("");loadExercises(selDay.id)};
+  const saveFGoal=async()=>{if(!fgName.trim()||!fgTarget)return;await api.post('fitness/goals',{exerciseName:fgName.trim(),goalType:fgType,targetValue:parseFloat(fgTarget),currentValue:parseFloat(fgCurrent)||0,unit:fgUnit,deadline:fgDeadline||null});setSAFG(false);setFGN("");setFGTar("");setFGC("0");loadFGoals()};
+
+  const startSession=async(dayId)=>{const r=await api.post('fitness/days/'+dayId+'/start-session',{});if(r.id){setView("session");loadActive()}};
+  const endSession=async()=>{if(!activeSession)return;await api.post('fitness/sessions/'+activeSession.id+'/end',{});setAS(null);setView("history");loadSessions()};
+  const logSet=async(setId,reps,weight)=>{if(!activeSession)return;await api.post('fitness/sessions/'+activeSession.id+'/log-set',{setId,actualReps:parseInt(reps),actualWeight:weight?parseFloat(weight):null});loadActive()};
+  const toggleSet=async(setId)=>{await api.post('fitness/sets/'+setId+'/toggle',{});loadActive()};
+
+  // Group sets by exercise
+  const groupSets=(sets)=>{const g={};(sets||[]).forEach(s=>{if(!g[s.exercise_name])g[s.exercise_name]=[];g[s.exercise_name].push(s)});return g};
+
+  const subNav=[{k:"plans",l:"Pläne"},{k:"session",l:"Training"},{k:"history",l:"History"},{k:"fgoals",l:"Fitness Goals"}];
+
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Fitness" icon={"\u{1F4AA}"} isMobile={isMobile} setMenuOpen={setMenuOpen}/>
+    <div style={{display:"flex",gap:6,marginBottom:16,flexWrap:"wrap"}}>{subNav.map(n=><button key={n.k} onClick={()=>setView(n.k)} style={{...view===n.k?S.btn("#e67e22"):S.btnO("#e67e22"),fontSize:12}}>{n.l}</button>)}</div>
+
+    {/* PLANS */}
+    {view==="plans"&&<div>
+      <div style={{display:"flex",gap:8,marginBottom:12}}><button onClick={()=>setSAP(true)} style={S.btn("#e67e22")}>+ Plan</button></div>
+      {!selPlan?<div>
+        {plans.length===0?<div style={S.card}><Empty icon={"\u{1F4AA}"} title="Keine Pläne" sub="Erstelle deinen Trainingsplan"/></div>
+        :plans.map(p=><div key={p.id} style={{...S.card,padding:"14px 16px",marginBottom:8,borderLeft:"3px solid #e67e22",cursor:"pointer"}} onClick={()=>setSelPlan(p)}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div><div style={{fontWeight:700,fontSize:15}}>{p.name}</div>{p.description&&<div style={{fontSize:12,color:T.textSec}}>{p.description}</div>}<div style={{fontSize:11,color:T.textMuted,marginTop:4}}>{p.day_count} Tage</div></div>
+            <div style={{display:"flex",gap:4}}><button onClick={e=>{e.stopPropagation();if(confirm("Plan löschen?")){api.del('fitness/plans/'+p.id).then(loadPlans)}}} style={S.btnO(T.accent)}>{"\u2715"}</button></div>
+          </div>
+        </div>)}
+      </div>
+      :<div>
+        <button onClick={()=>{setSelPlan(null);setSelDay(null)}} style={{...S.btnO(),marginBottom:12}}>{"\u2190"} Zurück</button>
+        <div style={{...S.card,marginBottom:12}}><div style={{fontWeight:700,fontSize:18}}>{selPlan.name}</div>{selPlan.description&&<div style={{fontSize:12,color:T.textSec,marginTop:4}}>{selPlan.description}</div>}</div>
+        <div style={{display:"flex",gap:8,marginBottom:12}}><button onClick={()=>setSAD(true)} style={S.btnSm("#e67e22")}>+ Tag</button></div>
+
+        {!selDay?days.map(d=><div key={d.id} style={{...S.card,padding:"12px 16px",marginBottom:8,cursor:"pointer",borderLeft:"3px solid "+T.orange}} onClick={()=>setSelDay(d)}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div><span style={{fontWeight:700}}>{d.day_name}</span>{d.focus&&<span style={{color:T.textSec}}> — {d.focus}</span>}<div style={{fontSize:11,color:T.textMuted}}>{d.ex_count} Übungen</div></div>
+            <div style={{display:"flex",gap:4}}>
+              <button onClick={e=>{e.stopPropagation();startSession(d.id)}} style={S.btnSm(T.green)}>{"\u25B6"} Start</button>
+              <button onClick={e=>{e.stopPropagation();api.del('fitness/days/'+d.id).then(()=>loadDays(selPlan.id))}} style={S.btnO(T.accent)}>{"\u2715"}</button>
+            </div>
+          </div>
+        </div>)
+        :<div>
+          <button onClick={()=>setSelDay(null)} style={{...S.btnO(),marginBottom:12}}>{"\u2190"} {selDay.day_name}</button>
+          <div style={{...S.card,marginBottom:12}}><div style={{fontWeight:700,fontSize:16}}>{selDay.day_name}: {selDay.focus}</div></div>
+          <button onClick={()=>setSAE(true)} style={{...S.btnSm("#e67e22"),marginBottom:12}}>+ Übung</button>
+          {exercises.map((ex,i)=><div key={ex.id} style={{...S.card,padding:"12px 16px",marginBottom:8}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontWeight:700,fontSize:14}}>{i+1}. {ex.exercise_name}</div>
+                <div style={{fontSize:12,color:T.textSec,marginTop:2}}>{ex.target_sets} Sets × {ex.target_reps} Reps</div>
+                {ex.target_weights&&<div style={{fontSize:12,color:T.blue,marginTop:2}}>Gewichte: {ex.target_weights} kg</div>}
+                {ex.note&&<div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{ex.note}</div>}
+              </div>
+              <button onClick={()=>api.del('fitness/exercises/'+ex.id).then(()=>loadExercises(selDay.id))} style={S.btnO(T.accent)}>{"\u2715"}</button>
+            </div>
+          </div>)}
+          <button onClick={()=>startSession(selDay.id)} style={{...S.btn(T.green),width:"100%",marginTop:12}}>{"\u25B6"} Training starten</button>
+        </div>}
+      </div>}
+    </div>}
+
+    {/* ACTIVE SESSION */}
+    {view==="session"&&<div>
+      {!activeSession?<div style={S.card}><Empty icon={"\u{1F3CB}"} title="Kein aktives Training" sub="Starte ein Training von einem Plan"/></div>
+      :<div>
+        <div style={{...S.card,marginBottom:12,borderColor:T.green}}>
+          <div style={{fontSize:11,fontWeight:700,color:T.green,letterSpacing:2,marginBottom:4,animation:"pulse 2s infinite"}}>{"\u25CF"} TRAINING AKTIV</div>
+          <div style={{fontWeight:700,fontSize:16}}>{activeSession.session_name}</div>
+          <div style={{fontSize:12,color:T.textSec,marginTop:4}}>Start: {new Date(activeSession.started_at).toLocaleTimeString('de-CH',{hour:'2-digit',minute:'2-digit'})}</div>
+          <div style={{fontSize:12,color:T.textSec,marginTop:2}}>{(activeSession.sets||[]).filter(s=>s.done).length}/{(activeSession.sets||[]).length} Sets erledigt</div>
+        </div>
+        {Object.entries(groupSets(activeSession.sets)).map(([exName,sets])=><div key={exName} style={{...S.card,padding:"14px 16px",marginBottom:10}}>
+          <div style={{fontWeight:700,fontSize:15,marginBottom:10}}>{exName}</div>
+          <div style={{display:"grid",gridTemplateColumns:"40px 1fr 1fr 1fr 50px",gap:4,marginBottom:4}}>
+            <div style={{fontSize:10,color:T.textSec,fontWeight:700}}>SET</div>
+            <div style={{fontSize:10,color:T.textSec,fontWeight:700}}>ZIEL</div>
+            <div style={{fontSize:10,color:T.textSec,fontWeight:700}}>REPS</div>
+            <div style={{fontSize:10,color:T.textSec,fontWeight:700}}>KG</div>
+            <div/>
+          </div>
+          {sets.map(s=><SetRow key={s.id} s={s} onLog={logSet} onToggle={toggleSet}/>)}
+        </div>)}
+        <button onClick={endSession} style={{...S.btn(T.accent),width:"100%",marginTop:8}}>{"\u23F9"} Training beenden</button>
+      </div>}
+    </div>}
+
+    {/* HISTORY */}
+    {view==="history"&&<div>
+      {sessions.length===0?<div style={S.card}><Empty icon={"\u{1F4CB}"} title="Keine Trainings" sub="Starte dein erstes Training"/></div>
+      :sessions.map(s=>{const pct=s.sets_total>0?Math.round(s.sets_done/s.sets_total*100):0;
+        return<div key={s.id} style={{...S.card,padding:"12px 16px",marginBottom:8,borderLeft:"3px solid "+(s.ended_at?T.green:T.orange)}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+            <div><div style={{fontWeight:700,fontSize:14}}>{s.session_name||"Training"}</div><div style={{fontSize:11,color:T.textSec}}>{new Date(s.started_at).toLocaleString('de-CH',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}{s.ended_at?' – '+new Date(s.ended_at).toLocaleTimeString('de-CH',{hour:'2-digit',minute:'2-digit'}):' (aktiv)'}</div></div>
+            <span style={{fontWeight:700,fontSize:16,color:pct>=80?T.green:pct>=50?T.orange:T.accent}}>{pct}%</span>
+          </div>
+          <Bar pct={pct} color={pct>=80?T.green:pct>=50?T.orange:T.accent}/>
+          <div style={{fontSize:11,color:T.textMuted,marginTop:4}}>{s.sets_done}/{s.sets_total} Sets</div>
+        </div>})}
+    </div>}
+
+    {/* FITNESS GOALS */}
+    {view==="fgoals"&&<div>
+      <button onClick={()=>setSAFG(true)} style={{...S.btn("#e67e22"),marginBottom:12}}>+ Fitness Goal</button>
+      {fGoals.length===0?<div style={S.card}><Empty icon={"\u{1F3AF}"} title="Keine Fitness Goals" sub="z.B. 100 Liegestütze in 3 Monaten"/></div>
+      :fGoals.map(fg=>{const pct=fg.target_value>0?Math.min(100,Math.round(fg.current_value/fg.target_value*100)):0;
+        return<div key={fg.id} style={{...S.card,padding:"14px 16px",marginBottom:8,borderLeft:"3px solid #e67e22"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div><div style={{fontWeight:700,fontSize:15}}>{fg.exercise_name}</div>{fg.deadline&&<div style={{fontSize:11,color:T.textSec}}>Deadline: {fmtDate(fg.deadline)} ({daysLeft(fg.deadline)}d)</div>}</div>
+            <button onClick={()=>{const v=prompt("Aktueller Wert:",fg.current_value);if(v!==null)api.put('fitness/goals/'+fg.id,{...fg,exerciseName:fg.exercise_name,currentValue:parseFloat(v)}).then(loadFGoals)}} style={S.btnSm(T.blue)}>{"\u270E"}</button>
+          </div>
+          <div style={{display:"flex",gap:12,marginBottom:8}}>
+            <div style={{textAlign:"center",flex:1,padding:8,background:T.bg,borderRadius:8}}><div style={{fontSize:22,fontWeight:700,color:T.text}}>{fg.current_value}</div><div style={{fontSize:9,color:T.textSec}}>IST</div></div>
+            <div style={{textAlign:"center",flex:1,padding:8,background:T.bg,borderRadius:8}}><div style={{fontSize:22,fontWeight:700,color:T.green}}>{fg.target_value}</div><div style={{fontSize:9,color:T.textSec}}>ZIEL {fg.unit}</div></div>
+          </div>
+          <Bar pct={pct} color={pct>=100?T.green:"#e67e22"}/>
+        </div>})}
+    </div>}
+
+    {/* MODALS */}
+    <Modal open={showAddPlan} onClose={()=>setSAP(false)} title="Neuer Plan"><div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div><div style={S.lbl}>NAME</div><input style={S.inp} value={pName} onChange={e=>setPN(e.target.value)} placeholder="z.B. Push Pull Legs" autoFocus/></div>
+      <div><div style={S.lbl}>BESCHREIBUNG</div><input style={S.inp} value={pDesc} onChange={e=>setPD(e.target.value)} placeholder="Optional"/></div>
+      <button onClick={savePlan} disabled={!pName.trim()} style={{...S.btn("#e67e22"),opacity:pName.trim()?1:.4}}>Erstellen</button>
+    </div></Modal>
+    <Modal open={showAddDay} onClose={()=>setSAD(false)} title="Neuer Tag"><div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div><div style={S.lbl}>TAG</div><input style={S.inp} value={dName} onChange={e=>setDN(e.target.value)} placeholder="z.B. Montag" autoFocus/></div>
+      <div><div style={S.lbl}>FOKUS</div><input style={S.inp} value={dFocus} onChange={e=>setDF(e.target.value)} placeholder="z.B. Brust / Trizeps"/></div>
+      <button onClick={saveDay} disabled={!dName.trim()} style={{...S.btn("#e67e22"),opacity:dName.trim()?1:.4}}>Hinzufügen</button>
+    </div></Modal>
+    <Modal open={showAddEx} onClose={()=>setSAE(false)} title="Neue Übung"><div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div><div style={S.lbl}>ÜBUNG</div><input style={S.inp} value={eName} onChange={e=>setEN(e.target.value)} placeholder="z.B. Bench Press" autoFocus/></div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <div><div style={S.lbl}>SETS</div><input type="number" style={S.inp} value={eSets} onChange={e=>setES(e.target.value)}/></div>
+        <div><div style={S.lbl}>REPS</div><input type="number" style={S.inp} value={eReps} onChange={e=>setER(e.target.value)}/></div>
+      </div>
+      <div><div style={S.lbl}>GEWICHTE (kommasep.)</div><input style={S.inp} value={eWeights} onChange={e=>setEW(e.target.value)} placeholder="z.B. 20, 25, 30, 35, 40"/></div>
+      <div><div style={S.lbl}>NOTIZ</div><input style={S.inp} value={eNote} onChange={e=>setENt(e.target.value)} placeholder="Optional"/></div>
+      <button onClick={saveExercise} disabled={!eName.trim()} style={{...S.btn("#e67e22"),opacity:eName.trim()?1:.4}}>Hinzufügen</button>
+    </div></Modal>
+    <Modal open={showAddGoal} onClose={()=>setSAFG(false)} title="Neues Fitness Goal"><div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div><div style={S.lbl}>ÜBUNG</div><input style={S.inp} value={fgName} onChange={e=>setFGN(e.target.value)} placeholder="z.B. Liegestütze" autoFocus/></div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <div><div style={S.lbl}>TYP</div><select style={S.sel} value={fgType} onChange={e=>setFGT(e.target.value)}><option value="reps">Reps</option><option value="weight">Gewicht</option><option value="time">Zeit</option></select></div>
+        <div><div style={S.lbl}>EINHEIT</div><input style={S.inp} value={fgUnit} onChange={e=>setFGU(e.target.value)} placeholder="z.B. Stk, kg, min"/></div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+        <div><div style={S.lbl}>ZIELWERT</div><input type="number" style={S.inp} value={fgTarget} onChange={e=>setFGTar(e.target.value)} placeholder="100"/></div>
+        <div><div style={S.lbl}>AKTUELL</div><input type="number" style={S.inp} value={fgCurrent} onChange={e=>setFGC(e.target.value)} placeholder="0"/></div>
+      </div>
+      <div><div style={S.lbl}>DEADLINE</div><input type="date" style={S.inp} value={fgDeadline} onChange={e=>setFGD(e.target.value)}/></div>
+      <button onClick={saveFGoal} disabled={!fgName.trim()||!fgTarget} style={{...S.btn("#e67e22"),opacity:fgName.trim()&&fgTarget?1:.4}}>Erstellen</button>
+    </div></Modal>
+  </div>
+}
+
+function SetRow({s,onLog,onToggle}){
+  const[reps,setR]=useState(String(s.actual_reps||s.target_reps||""));
+  const[wt,setW]=useState(String(s.actual_weight||s.target_weight||""));
+  return<div style={{display:"grid",gridTemplateColumns:"40px 1fr 1fr 1fr 50px",gap:4,padding:"4px 0",borderBottom:"1px solid "+T.border,opacity:s.done?.6:1}}>
+    <span style={{fontWeight:700,fontSize:13,color:T.textSec}}>{s.set_number}</span>
+    <span style={{fontSize:12,color:T.textMuted}}>{s.target_reps}r{s.target_weight?' / '+s.target_weight+'kg':''}</span>
+    <input type="number" style={{...S.inp,fontSize:12,padding:"4px 6px"}} value={reps} onChange={e=>setR(e.target.value)} disabled={s.done}/>
+    <input type="number" step="0.5" style={{...S.inp,fontSize:12,padding:"4px 6px"}} value={wt} onChange={e=>setW(e.target.value)} disabled={s.done}/>
+    <button onClick={()=>{if(s.done)onToggle(s.id);else onLog(s.id,reps,wt)}} style={{...s.done?S.btnSm(T.green):S.btnSm(T.blue),padding:"4px 8px",fontSize:11}}>{s.done?"\u2713":"OK"}</button>
+  </div>
+}
+
+/* ============ WEIGHT ============ */
+function WeightTab({isMobile,setMenuOpen}){
+  const[logs,setLogs]=useState([]);const[target,setTarget]=useState("");
+  const[w,setW]=useState("");const[d,setD]=useState(new Date().toISOString().slice(0,10));const[note,setNote]=useState("");
+  const[range,setRange]=useState(90);const[editTarget,setET]=useState(false);
+  const[editId,setEditId]=useState(null);const[editW,setEditW]=useState("");const[editN,setEditN]=useState("");const[editD,setEditD]=useState("");
+  const[tick,setTick]=useState(0);
+
+  const reload=()=>setTick(n=>n+1);
+
+  useEffect(()=>{
+    api.get('weight?days='+range).then(res=>{
+      if(res&&!res.error){setLogs(Array.isArray(res.logs)?res.logs:[]);setTarget(res.target||"")}
+    });
+  },[range,tick]);
+
+  const saveWeight=async()=>{
+    if(!w)return;
+    const res=await api.post('weight',{logDate:d,weight:parseFloat(w),note:note.trim()});
+    if(res?.error){alert('Fehler: '+res.error);return}
+    setW("");setNote("");setD(new Date().toISOString().slice(0,10));reload();
+  };
+  const updateWeight=async()=>{
+    if(!editW)return;
+    const res=await api.post('weight',{logDate:editD,weight:parseFloat(editW),note:editN.trim()});
+    if(res?.error){alert('Fehler: '+res.error);return}
+    setEditId(null);reload();
+  };
+  const saveTargetW=async()=>{
+    const res=await api.post('weight/target',{target:target});
+    if(res?.error){alert('Fehler: '+res.error);return}
+    setET(false);reload();
+  };
+  const delLog=async(id)=>{if(confirm("Eintrag löschen?")){await api.del('weight/'+id);reload()}};
+  const startEdit=(l)=>{setEditId(l.id);setEditW(String(l.weight));setEditN(l.note||"");setEditD(l.log_date)};
+
+  const sorted=[...logs].sort((a,b)=>a.log_date.localeCompare(b.log_date));
+  const weights=sorted.map(l=>parseFloat(l.weight));
+  const tgt=parseFloat(target)||null;
+  const latest=logs.length>0?parseFloat(logs[0].weight):null;
+  const oldest=sorted.length>0?parseFloat(sorted[0].weight):null;
+  const mn=weights.length>0?Math.min(...weights):0;
+  const mx=weights.length>0?Math.max(...weights):100;
+  const avg=weights.length>0?(weights.reduce((a,b)=>a+b,0)/weights.length).toFixed(1):null;
+  const diff=latest&&oldest&&sorted.length>1?(latest-oldest).toFixed(1):null;
+  const chartMin=Math.min(mn,tgt||mn)-1;const chartMax=Math.max(mx,tgt||mx)+1;
+
+  const cW=600,cH=200,pad={t:20,r:20,b:30,l:45};
+  const pw=cW-pad.l-pad.r,ph=cH-pad.t-pad.b;
+  const xScale=i=>pad.l+(sorted.length>1?i/(sorted.length-1)*pw:pw/2);
+  const yScale=v=>pad.t+ph-(v-chartMin)/(chartMax-chartMin)*ph;
+
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Gewicht" icon={"\u2696\uFE0F"} isMobile={isMobile} setMenuOpen={setMenuOpen}/>
+
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
+        <div style={{flex:"1 1 100px"}}><div style={S.lbl}>DATUM</div><input type="date" style={S.inp} value={d} onChange={e=>setD(e.target.value)}/></div>
+        <div style={{flex:"1 1 80px"}}><div style={S.lbl}>GEWICHT (kg)</div><input type="number" step="0.1" style={{...S.inp,fontSize:18,fontWeight:700,textAlign:"center"}} value={w} onChange={e=>setW(e.target.value)} placeholder="78.5" onKeyDown={e=>e.key==='Enter'&&saveWeight()}/></div>
+        <div style={{flex:"2 1 120px"}}><div style={S.lbl}>NOTIZ</div><input style={S.inp} value={note} onChange={e=>setNote(e.target.value)} placeholder="Optional..." onKeyDown={e=>e.key==='Enter'&&saveWeight()}/></div>
+        <button onClick={saveWeight} disabled={!w} style={{...S.btn(T.green),opacity:w?1:.4,padding:"10px 20px"}}>Speichern</button>
+      </div>
+    </div>
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:16}}>
+      <div style={{...S.card,textAlign:"center",padding:"12px 8px"}}><div style={{fontSize:22,fontWeight:700,color:T.accent}}>{latest?latest.toFixed(1):"-"}</div><div style={{fontSize:9,color:T.textSec}}>AKTUELL (kg)</div></div>
+      <div style={{...S.card,textAlign:"center",padding:"12px 8px"}}><div style={{fontSize:22,fontWeight:700,color:diff&&parseFloat(diff)<0?T.green:diff&&parseFloat(diff)>0?T.accent:T.text}}>{diff?((parseFloat(diff)>0?"+":"")+diff):"-"}</div><div style={{fontSize:9,color:T.textSec}}>{range}d DIFF</div></div>
+      <div style={{...S.card,textAlign:"center",padding:"12px 8px"}}><div style={{fontSize:22,fontWeight:700,color:T.blue}}>{avg||"-"}</div><div style={{fontSize:9,color:T.textSec}}>SCHNITT</div></div>
+      <div style={{...S.card,textAlign:"center",padding:"12px 8px",cursor:"pointer",outline:editTarget?"2px solid "+T.orange:"none",borderRadius:12}} onClick={()=>setET(!editTarget)}>
+        <div style={{fontSize:22,fontWeight:700,color:T.orange}}>{tgt?tgt.toFixed(1):"-"}</div><div style={{fontSize:9,color:T.textSec}}>ZIEL {"\u270E"}</div>
+      </div>
+    </div>
+
+    {editTarget&&<div style={{...S.card,marginBottom:16}}>
+      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+        <div style={{flex:1}}><div style={S.lbl}>ZIELGEWICHT (kg)</div><input type="number" step="0.1" style={{...S.inp,fontSize:16,fontWeight:700,textAlign:"center"}} value={target} onChange={e=>setTarget(e.target.value)} autoFocus onKeyDown={e=>e.key==='Enter'&&saveTargetW()}/></div>
+        <button onClick={saveTargetW} style={{...S.btn(T.orange),padding:"10px 20px"}}>Speichern</button>
+        <button onClick={()=>setET(false)} style={{...S.btnO(),padding:"10px 14px"}}>{"\u2715"}</button>
+      </div>
+    </div>}
+
+    <div style={{display:"flex",gap:6,marginBottom:12}}>
+      {[{k:30,l:"30d"},{k:90,l:"90d"},{k:180,l:"6Mt"},{k:365,l:"1J"}].map(r=>
+        <button key={r.k} onClick={()=>setRange(r.k)} style={{...(range===r.k?S.btn(T.blue):S.btnO(T.blue)),fontSize:11}}>{r.l}</button>)}
+    </div>
+
+    {sorted.length>=2?<div style={{...S.card,padding:12,marginBottom:16}}>
+      <svg viewBox={`0 0 ${cW} ${cH}`} style={{width:"100%",height:"auto"}}>
+        {Array.from({length:5},(_,i)=>{const v=chartMin+(chartMax-chartMin)*i/4;
+          return<g key={i}><line x1={pad.l} y1={yScale(v)} x2={cW-pad.r} y2={yScale(v)} stroke={T.border} strokeWidth="0.5"/>
+            <text x={pad.l-6} y={yScale(v)+4} textAnchor="end" fill={T.textMuted} fontSize="10">{v.toFixed(1)}</text></g>})}
+        {tgt&&<><line x1={pad.l} y1={yScale(tgt)} x2={cW-pad.r} y2={yScale(tgt)} stroke={T.orange} strokeWidth="1.5" strokeDasharray="6,3"/>
+          <text x={cW-pad.r+4} y={yScale(tgt)+4} fill={T.orange} fontSize="10" fontWeight="600">Ziel</text></>}
+        <polyline fill="none" stroke={T.accent} strokeWidth="2.5" strokeLinejoin="round"
+          points={sorted.map((l,i)=>xScale(i)+","+yScale(parseFloat(l.weight))).join(" ")}/>
+        <polygon fill={T.accent+"18"} points={
+          sorted.map((l,i)=>xScale(i)+","+yScale(parseFloat(l.weight))).join(" ")+
+          " "+xScale(sorted.length-1)+","+yScale(chartMin)+" "+xScale(0)+","+yScale(chartMin)}/>
+        {sorted.map((l,i)=><circle key={i} cx={xScale(i)} cy={yScale(parseFloat(l.weight))} r="3.5" fill={T.accent} stroke={T.card} strokeWidth="1.5"/>)}
+        {sorted.filter((_,i)=>sorted.length<=10||i%(Math.ceil(sorted.length/8))===0||i===sorted.length-1).map(l=>
+          <text key={l.log_date} x={xScale(sorted.indexOf(l))} y={cH-6} textAnchor="middle" fill={T.textMuted} fontSize="9">
+            {new Date(l.log_date).toLocaleDateString('de-CH',{day:'numeric',month:'short'})}
+          </text>)}
+      </svg>
+    </div>
+    :sorted.length===1?<div style={{...S.card,padding:20,textAlign:"center",marginBottom:16,color:T.textSec}}>Mindestens 2 Einträge für Chart nötig</div>
+    :null}
+
+    {logs.length>0&&<div style={{...S.card,padding:0,overflow:"hidden",marginBottom:16}}>
+      <div style={{padding:"12px 16px",borderBottom:"1px solid "+T.border,fontWeight:700,fontSize:13}}>Verlauf ({logs.length})</div>
+      {logs.slice(0,50).map((l,i)=>{
+        const prev=logs[i+1]?parseFloat(logs[i+1].weight):null;const cur=parseFloat(l.weight);const ch=prev?(cur-prev).toFixed(1):null;
+        const isEditing=editId===l.id;
+        return<div key={l.id} style={{borderBottom:"1px solid "+T.border+"40"}}>
+          {isEditing?<div style={{padding:"10px 16px",background:T.bg}}>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"flex-end"}}>
+              <div style={{flex:"1 1 100px"}}><div style={{...S.lbl,fontSize:9}}>DATUM</div><input type="date" style={{...S.inp,fontSize:12,padding:"6px 8px"}} value={editD} onChange={e=>setEditD(e.target.value)}/></div>
+              <div style={{flex:"0 1 80px"}}><div style={{...S.lbl,fontSize:9}}>KG</div><input type="number" step="0.1" style={{...S.inp,fontSize:14,fontWeight:700,padding:"6px 8px",textAlign:"center"}} value={editW} onChange={e=>setEditW(e.target.value)} onKeyDown={e=>e.key==='Enter'&&updateWeight()}/></div>
+              <div style={{flex:"2 1 100px"}}><div style={{...S.lbl,fontSize:9}}>NOTIZ</div><input style={{...S.inp,fontSize:12,padding:"6px 8px"}} value={editN} onChange={e=>setEditN(e.target.value)} onKeyDown={e=>e.key==='Enter'&&updateWeight()}/></div>
+              <button onClick={updateWeight} style={{...S.btn(T.green),fontSize:11,padding:"6px 14px"}}>{"\u2713"}</button>
+              <button onClick={()=>setEditId(null)} style={{...S.btnO(),fontSize:11,padding:"6px 10px"}}>{"\u2715"}</button>
+            </div>
+          </div>
+          :<div style={{display:"flex",alignItems:"center",padding:"10px 16px",gap:10}}>
+            <div style={{fontSize:12,color:T.textSec,width:70,flexShrink:0}}>{new Date(l.log_date).toLocaleDateString('de-CH',{day:'numeric',month:'short'})}</div>
+            <div style={{fontSize:16,fontWeight:700,width:65,flexShrink:0}}>{cur.toFixed(1)}</div>
+            {ch&&<div style={{fontSize:12,fontWeight:600,color:parseFloat(ch)<0?T.green:parseFloat(ch)>0?T.accent:T.textMuted,width:45,flexShrink:0}}>{parseFloat(ch)>0?"+":""}{ch}</div>}
+            <div style={{fontSize:11,color:T.textMuted,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.note||""}</div>
+            <button onClick={()=>startEdit(l)} style={{...S.btnO(T.blue),padding:"3px 8px",fontSize:10}}>{"\u270E"}</button>
+            <button onClick={()=>delLog(l.id)} style={{...S.btnO(T.accent),padding:"3px 8px",fontSize:10}}>{"\u2715"}</button>
+          </div>}
+        </div>})}
+    </div>}
+
+    {logs.length===0&&<div style={S.card}><Empty icon={"\u2696\uFE0F"} title="Keine Einträge" sub="Trage dein Gewicht oben ein"/></div>}
+  </div>
+}
+
+/* ============ CATS ============ */
+
+function CatsTab({categories,catColor,catStats,setSCM,setEC,deleteCat,isMobile,setMenuOpen,loadData}){
+  const reorder=async(newList)=>{
+    await api.post('reorder',{table:'categories',ids:newList.map(c=>c.id)});loadData();
+  };
+  const{dragIdx,overIdx,onDS,onDO,onDE}=useDrag(catStats,items=>{reorder(items)});
+  return<div style={{animation:"fadeIn .3s"}}>
+    <PageHeader title="Kategorien" icon={"\u{1F4C1}"} isMobile={isMobile} setMenuOpen={setMenuOpen}><button onClick={()=>setSCM(true)} style={S.btn(T.orange)}>+ Kategorie</button></PageHeader>
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+    {categories.length===0?<div style={S.card}><Empty icon={"\u{1F4C1}"} title="Keine Kategorien" sub="Erstelle deine erste Kategorie."/></div>
+    :catStats.map((c,i)=>{const col=catColor(c.id);const isDrag=dragIdx===i;const isOver=overIdx===i;
+      const cat=categories.find(x=>x.id===c.id);
+      return<div key={c.id} onDragOver={e=>onDO(e,i)} onDragEnd={onDE} style={{...S.card,borderLeft:"3px solid "+col,display:"flex",gap:10,alignItems:"flex-start",opacity:isDrag?.4:1,borderTop:isOver?"2px solid "+T.accent:undefined,transition:"opacity .2s"}}>
+        <DragHandle onDS={onDS} idx={i}/>
+        <div style={{flex:1}}>
+          <div style={{fontWeight:700,fontSize:16,marginBottom:4}}>{c.name}</div>
+          {c.description&&<div style={{fontSize:12,color:T.textSec,marginBottom:6}}>{c.description}</div>}
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
+            <span style={S.badge(col)}>{c.goal_count} Goals</span>
+            <span style={S.badge(T.green)}>{c.completed}{"\u2713"}</span>
+            <span style={S.badge(T.blue)}>{fmtMins(c.total_mins)}</span>
+          </div>
+          <div style={{display:"flex",gap:12,fontSize:10,color:T.textMuted}}>
+            {cat?.created_at&&<span>Erstellt: {fmtTS(cat.created_at)}</span>}
+            {cat?.updated_at&&cat.updated_at!==cat.created_at&&<span>Geändert: {fmtTS(cat.updated_at)}</span>}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:4,flexShrink:0}}><button onClick={()=>{const full={...c,...cat};setEC(full);setSCM(true)}} style={S.btnO()}>{"\u270E"}</button><button onClick={()=>{if(confirm("Löschen?"))deleteCat(c.id)}} style={S.btnO(T.accent)}>{"\u2715"}</button></div>
+      </div>})}
+    </div>
+  </div>
+}
+
+/* ============ MODALS ============ */
+function CatModal({open,onClose,onSave,edit}){
+  const[n,setN]=useState("");const[d,setD]=useState("");
+  useEffect(()=>{if(edit){setN(edit.name||"");setD(edit.description||"")}else{setN("");setD("")}},[edit,open]);
+  return<Modal open={open} onClose={onClose} title={edit?"Kategorie bearbeiten":"Neue Kategorie"}><div style={{display:"flex",flexDirection:"column",gap:14}}>
+    <div><div style={S.lbl}>NAME</div><input style={{...S.inp,fontSize:16,padding:"12px 16px"}} value={n} onChange={e=>setN(e.target.value)} placeholder="z.B. Beruf, Studium, Fitness..." autoFocus/></div>
+    <div><div style={S.lbl}>BESCHREIBUNG</div><textarea style={{...S.inp,minHeight:100,resize:"vertical",lineHeight:1.6}} value={d} onChange={e=>setD(e.target.value)} placeholder="Worum geht es in dieser Kategorie? Notizen, Kontext..."/></div>
+    {edit&&<div style={{display:"flex",gap:16,fontSize:11,color:T.textMuted,padding:"8px 0",borderTop:"1px solid "+T.border}}>
+      {edit.created_at&&<span>{"\u{1F4C5}"} Erstellt: {fmtTS(edit.created_at)}</span>}
+      {edit.updated_at&&edit.updated_at!==edit.created_at&&<span>{"\u270E"} Geändert: {fmtTS(edit.updated_at)}</span>}
+    </div>}
+    <button onClick={()=>{if(n.trim())onSave({name:n.trim(),description:d.trim()})}} disabled={!n.trim()} style={{...S.btn(T.orange),opacity:n.trim()?1:.4}}>{edit?"Speichern":"Erstellen"}</button>
+  </div></Modal>
+}
+
+function GoalModal({open,onClose,onSave,edit,categories}){
+  const[t,setT]=useState("");const[cId,setCI]=useState("");const[dl,setDL]=useState("");
+  const[gType,setGT]=useState("habit");const[freq,setFreq]=useState("daily");const[tPP,setTPP]=useState("");const[tU,setTU]=useState("");const[tTg,setTT]=useState("");const[tD,setTD]=useState("up");
+  const[smart,setSm]=useState({specific:"",measurable:"",achievable:"",relevant:"",timeBound:""});
+  useEffect(()=>{if(!open)return;if(edit){setT(edit.title||"");setCI(String(edit.category_id||""));setDL(edit.deadline||"");setGT(edit.goal_type==='tracking'?'tracking':'habit');setFreq(edit.frequency||"daily");setTPP(edit.target_per_period?String(edit.target_per_period):"");setTU(edit.tracking_unit||"");setTT(edit.tracking_target?String(edit.tracking_target):"");setTD(edit.tracking_direction||"up");setSm(edit.smart||{specific:"",measurable:"",achievable:"",relevant:"",timeBound:""})}else{setT("");setCI(categories.length?String(categories[0].id):"");setDL("");setGT("habit");setFreq("daily");setTPP("");setTU("");setTT("");setTD("up");setSm({specific:"",measurable:"",achievable:"",relevant:"",timeBound:""})}},[edit,open,categories]);
+  return<Modal open={open} onClose={onClose} title={edit?"Goal bearbeiten":"Neues Goal"}><div style={{display:"flex",flexDirection:"column",gap:14}}>
+    <div><div style={S.lbl}>TITEL</div><input style={S.inp} value={t} onChange={e=>setT(e.target.value)} placeholder="Was willst du erreichen?" autoFocus/></div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+      <div><div style={S.lbl}>KATEGORIE</div><select style={S.sel} value={cId} onChange={e=>setCI(e.target.value)}><option value="">Wählen...</option>{categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+      <div><div style={S.lbl}>FREQUENZ</div><select style={S.sel} value={freq} onChange={e=>setFreq(e.target.value)}><option value="daily">{"\u{1F504}"} Täglich</option><option value="weekly">{"\u{1F4C5}"} Wöchentlich</option><option value="monthly">{"\u{1F4C6}"} Monatlich</option><option value="once">{"\u{1F3AF}"} Einmalig</option></select></div>
+    </div>
+    <div><div style={S.lbl}>TYP</div><select style={S.sel} value={gType} onChange={e=>setGT(e.target.value)}><option value="habit">{"\u2705"} Habit (erledigt/nicht erledigt)</option><option value="tracking">{"\u{1F4CA}"} Tracking (Wert messen)</option></select></div>
+    {gType==="tracking"&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+      <div><div style={S.lbl}>EINHEIT</div><input style={S.inp} value={tU} onChange={e=>setTU(e.target.value)} placeholder="kg, km, %"/></div>
+      <div><div style={S.lbl}>ZIELWERT</div><input type="number" step="0.1" style={S.inp} value={tTg} onChange={e=>setTT(e.target.value)} placeholder="75"/></div>
+      <div><div style={S.lbl}>RICHTUNG</div><select style={S.sel} value={tD} onChange={e=>setTD(e.target.value)}><option value="up">{"\u2191"} Mehr</option><option value="down">{"\u2193"} Weniger</option></select></div>
+    </div>}
+    {freq!=="once"&&<div><div style={S.lbl}>ZIEL PRO {freq==="daily"?"TAG":freq==="weekly"?"WOCHE":"MONAT"} (optional)</div><input type="number" step="0.1" style={S.inp} value={tPP} onChange={e=>setTPP(e.target.value)} placeholder="z.B. 3x pro Woche"/></div>}
+    <div><div style={S.lbl}>DEADLINE (optional)</div><input type="date" style={S.inp} value={dl} onChange={e=>setDL(e.target.value)}/></div>
+    <div style={{padding:14,background:T.bg,borderRadius:12}}><div style={{...S.lbl,marginBottom:12}}>SMART KRITERIEN</div>{Object.entries(smartLabels).map(([k,m])=><div key={k} style={{marginBottom:12}}><div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}><span>{m.i}</span><span style={{fontSize:15,fontWeight:700,color:T.textSec}}>{m.l}</span></div><textarea style={{...S.inp,resize:"vertical",minHeight:50}} rows={2} value={smart[k]} onChange={e=>setSm({...smart,[k]:e.target.value})} placeholder={m.d}/></div>)}</div>
+    <button onClick={()=>{if(t.trim()&&cId)onSave({title:t.trim(),categoryId:cId,goalType:gType,frequency:freq,targetPerPeriod:tPP?parseFloat(tPP):null,deadline:dl||null,targetMinutes:0,trackingUnit:tU,trackingTarget:tTg?parseFloat(tTg):null,trackingDirection:tD,smart,progress:edit?.progress||0})}} disabled={!t.trim()||!cId} style={{...S.btn(),opacity:t.trim()&&cId?1:.4}}>{edit?"Speichern":"Erstellen"}</button>
+  </div></Modal>
+}
+
+/* ============ ENTRY MODAL ============ */
+function EntryModal({open,onClose,onSave,categories,labels,edit}){
+  const now=new Date();const td=now.toISOString().slice(0,10);const nt=now.toTimeString().slice(0,5);
+  const[cId,setCI]=useState("");const[label,setLabel]=useState("");
+  const[sD,setSD]=useState(td);const[sT,setST]=useState("");
+  const[eD,setED]=useState(td);const[eT,setET]=useState("");
+  const[note,setN]=useState("");
+  useEffect(()=>{if(open){
+    if(edit){setCI(String(edit.category_id||""));setLabel(edit.label||"");setSD(edit.entry_date||td);setST(edit.start_time?edit.start_time.slice(0,5):"");setED(edit.end_date||edit.entry_date||td);setET(edit.end_time?edit.end_time.slice(0,5):"");setN(edit.note||"")}
+    else{setCI(categories[0]?.id?String(categories[0].id):"");setLabel("");setSD(td);setST(nt);setED(td);setET("");setN("")}
+  }},[open,categories,edit]);
+  const calcM=()=>{if(!sT||!eT)return 0;const s=new Date(sD+'T'+sT);const e=new Date(eD+'T'+eT);const diff=(e-s)/60000;return diff>0?Math.round(diff):0};
+  const mins=calcM();const ok=cId&&mins>0;
+  const multiDay=sD!==eD;
+  const catLabels=(labels||[]).filter(l=>String(l.category_id)===cId).sort((a,b)=>(b.cnt||0)-(a.cnt||0));
+  return<Modal open={open} onClose={onClose} title={edit?"Bearbeiten":"Zeit loggen"}><div style={{display:"flex",flexDirection:"column",gap:12}}>
+    {/* Category */}
+    <div><div style={S.lbl}>KATEGORIE</div><select style={S.sel} value={cId} onChange={e=>{setCI(e.target.value);setLabel("")}}><option value="">Wählen...</option>{categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+    {/* Label - chips first, input for new ones */}
+    {cId&&<div>
+      <div style={S.lbl}>LABEL</div>
+      {catLabels.length>0?<div style={{display:"flex",gap:5,marginBottom:6,flexWrap:"wrap"}}>
+        {catLabels.map((l,i)=><button key={i} onClick={()=>setLabel(label===l.label?'':l.label)} style={{padding:"7px 16px",fontSize:14,borderRadius:8,border:"1px solid "+(label===l.label?T.blue:T.border),background:label===l.label?T.blue+"22":"transparent",color:label===l.label?T.blue:T.textSec,cursor:"pointer",fontFamily:"inherit",fontWeight:label===l.label?700:400}}>{l.label}</button>)}
+        <input style={{...S.inp,width:"auto",flex:"0 1 140px",padding:"6px 10px",fontSize:13}} value={catLabels.some(l=>l.label===label)?'':label} onChange={e=>setLabel(e.target.value)} placeholder="+ Neues..."/>
+      </div>
+      :<input style={S.inp} value={label} onChange={e=>setLabel(e.target.value)} placeholder="z.B. Arbeit, Pendeln..."/>}
+    </div>}
+    {/* Times */}
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8}}>
+      <div><div style={S.lbl}>DATUM</div><input type="date" style={S.inp} value={sD} onChange={e=>setSD(e.target.value)}/></div>
+      <div><div style={S.lbl}>VON</div><input type="time" style={S.inp} value={sT} onChange={e=>setST(e.target.value)}/></div>
+      <div><div style={S.lbl}>BIS</div><input type="time" style={S.inp} value={eT} onChange={e=>setET(e.target.value)}/></div>
+      <div style={{display:"flex",alignItems:"flex-end"}}>{sT&&eT&&<div style={{fontSize:18,fontWeight:700,color:mins>0?T.blue:T.accent,padding:"8px 0"}}>{mins>0?fmtMins(mins):"–"}</div>}</div>
+    </div>
+    {multiDay&&<div style={{fontSize:11,color:T.orange}}>{"\u{1F319}"} Über Mitternacht</div>}
+    <div><div style={S.lbl}>NOTIZ (optional)</div><input style={S.inp} value={note} onChange={e=>setN(e.target.value)} placeholder="Details..."/></div>
+    <button onClick={()=>{if(ok)onSave({id:edit?.id,categoryId:cId,goalId:null,label:label.trim(),minutes:mins,startTime:sT,endTime:eT,note:note.trim(),entryDate:sD,endDate:eD})}} disabled={!ok} style={{...S.btn(T.blue),opacity:ok?1:.4}}>{edit?"Speichern":"Loggen"}</button>
+  </div></Modal>
+}
+
+/* ============ APP (Local - No Login) ============ */
+function App(){
+  const[tab,setTab]=useState("dash");
+  const[categories,setCats]=useState([]);const[goals,setGoals]=useState([]);const[entries,setEntries]=useState([]);const[labels,setLabels]=useState([]);
+  const[catStats,setCS]=useState([]);const[weekData,setWD]=useState([]);const[loaded,setLoaded]=useState(false);
+  const[showCatM,setSCM]=useState(false);const[showGoalM,setSGM]=useState(false);const[showEntryM,setSEM]=useState(false);
+  const[editCat,setEC]=useState(null);const[editGoal,setEG]=useState(null);const[editEntry,setEE]=useState(null);
+  const[menuOpen,setMenuOpen]=useState(false);
+  const[isMobile,setIsMobile]=useState(window.innerWidth<768);
+  useEffect(()=>{const h=()=>setIsMobile(window.innerWidth<768);window.addEventListener('resize',h);return()=>window.removeEventListener('resize',h)},[]);
+
+  const loadData=async()=>{try{const[c,g,e,s,lb]=await Promise.all([api.get('categories'),api.get('goals'),api.get('entries'),api.get('stats'),api.get('labels')]);setCats(Array.isArray(c)?c:[]);setGoals(Array.isArray(g)?g:[]);setEntries(Array.isArray(e)?e:[]);setCS(s.catStats||[]);setWD(s.weekData||[]);setLabels(Array.isArray(lb)?lb:[]);setLoaded(true)}catch(e){console.error(e);setLoaded(true)}};
+  useEffect(()=>{openDB().then(()=>loadData())},[]);
+  useEffect(()=>{const h=()=>loadData();window.addEventListener('tf-reload',h);return()=>window.removeEventListener('tf-reload',h)},[]);
+
+  const catColor=id=>{const i=categories.findIndex(c=>c.id==id);return T.colors[i>=0?i%T.colors.length:0]};
+  const catName=id=>categories.find(c=>c.id==id)?.name||"—";
+
+  const saveCat=async d=>{if(editCat)await api.put('categories/'+editCat.id,d);else await api.post('categories',d);setSCM(false);setEC(null);loadData()};
+  const delCat=async id=>{await api.del('categories/'+id);loadData()};
+  const saveGoal=async d=>{if(editGoal)await api.put('goals/'+editGoal.id,d);else await api.post('goals',d);setSGM(false);setEG(null);loadData()};
+  const delGoal=async id=>{await api.del('goals/'+id);loadData()};
+  const togGoal=async id=>{await api.post('goals/'+id+'/toggle');loadData()};
+  const saveEntry=async d=>{if(d.id)await api.put('entries/'+d.id,d);else await api.post('entries',d);setSEM(false);setEE(null);loadData()};
+  const delEntry=async id=>{await api.del('entries/'+id);loadData()};
+
+  // Export all data as JSON
+  const exportData=async()=>{
+    const data={};
+    for(const store of ['categories','goals','entries','habit_logs','tracking_entries','settings','life_values','budgets','budget_categories','budget_entries','lessons','fitness_plans','fitness_days','fitness_exercises','fitness_sessions','session_sets','fitness_goals','weight_logs']){
+      data[store]=await dbAll(store);
+    }
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+    const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='timeflow-backup-'+new Date().toISOString().slice(0,10)+'.json';a.click();URL.revokeObjectURL(url);
+  };
+  // Import from JSON
+  const importData=async()=>{
+    const input=document.createElement('input');input.type='file';input.accept='.json';
+    input.onchange=async e=>{
+      const file=e.target.files[0];if(!file)return;
+      if(!confirm('Alle bestehenden Daten werden überschrieben. Fortfahren?'))return;
+      const text=await file.text();const data=JSON.parse(text);
+      const db=await openDB();
+      for(const store of Object.keys(data)){
+        if(!db.objectStoreNames.contains(store))continue;
+        const tx=db.transaction(store,'readwrite');const s=tx.objectStore(store);
+        await new Promise(r=>{s.clear().onsuccess=r});
+        for(const item of data[store]){
+          try{s.add(item)}catch(e){}
+        }
+        await new Promise(r=>{tx.oncomplete=r});
+      }
+      loadData();alert('Import erfolgreich!');
+    };
+    input.click();
+  };
+
+  if(!loaded)return<div style={{background:T.bg,height:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{color:T.textSec}}>Laden...</div></div>;
+
+  const sh={isMobile,setMenuOpen};
+  return<div style={{display:"flex",height:"100vh",background:T.bg,fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif",color:T.text}}>
+    <Sidebar tab={tab} setTab={setTab} user={{username:'Lokal'}} onLogout={()=>{}} isMobile={isMobile} isOpen={menuOpen} setIsOpen={setMenuOpen} onExport={exportData} onImport={importData}/>
+    <div style={{flex:1,overflowY:"auto",padding:isMobile?"16px 16px 40px":"24px 32px 40px",WebkitOverflowScrolling:"touch"}}>
+      {tab==="dash"&&<DashboardTab {...{categories,goals,entries,catColor,catName,loadData,...sh}}/>}
+      {tab==="erfassung"&&<ErfassungTab {...{entries,categories,labels,catColor,catName,setSEM,setEditEntry:setEE,deleteEntry:delEntry,loadData,...sh}}/>}
+      {tab==="tracking"&&<TrackingTab {...{catColor,catName,loadData,...sh}}/>}
+      {tab==="auswertungen"&&<AuswertungenTab {...{catColor,catName,entries,...sh}}/>}
+      {tab==="goals"&&<GoalsTab {...{goals,categories,entries,catColor,catName,setSGM,setEG,deleteGoal:delGoal,togGoal,setSEM,loadData,...sh}}/>}
+      {tab==="fitness"&&<FitnessTab loadData={loadData} {...sh}/>}
+      {tab==="matrix"&&<MatrixTab categories={categories} loadData={loadData} {...sh}/>}
+      {tab==="budget"&&<BudgetTab categories={categories} goals={goals} loadData={loadData} {...sh}/>}
+      {tab==="lessons"&&<LessonsTab categories={categories} {...sh}/>}
+      {tab==="weight"&&<WeightTab {...sh}/>}
+      {tab==="cats"&&<CatsTab {...{categories,catColor,catStats,setSCM,setEC,deleteCat:delCat,loadData,...sh}}/>}
+    </div>
+    <CatModal open={showCatM} onClose={()=>{setSCM(false);setEC(null)}} onSave={saveCat} edit={editCat}/>
+    <GoalModal open={showGoalM} onClose={()=>{setSGM(false);setEG(null)}} onSave={saveGoal} edit={editGoal} categories={categories}/>
+    <EntryModal open={showEntryM} onClose={()=>{setSEM(false);setEE(null)}} onSave={saveEntry} categories={categories} labels={labels} edit={editEntry}/>
+  </div>
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
