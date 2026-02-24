@@ -46,12 +46,14 @@ let _db=null;
 let _cryptoKey=null; // AES key derived from password, lives only in memory
 
 // --- Crypto helpers (Web Crypto API, no external libs) ---
-const SALT_KEY='tf_salt';const VERIFY_KEY='tf_verify';
-function getSalt(){let s=localStorage.getItem(SALT_KEY);if(!s){const arr=new Uint8Array(16);crypto.getRandomValues(arr);s=btoa(String.fromCharCode(...arr));localStorage.setItem(SALT_KEY,s)}return Uint8Array.from(atob(s),c=>c.charCodeAt(0))}
+const VERIFY_KEY='tf_verify';
+// Fixed app salt - ensures same password = same key on every browser/device
+// Security comes from password strength + 100k PBKDF2 iterations
+const APP_SALT=new Uint8Array([84,105,109,101,70,108,111,119,50,48,50,54,83,97,108,116]); // "TimeFlow2026Salt"
 async function deriveKey(password){
   const enc=new TextEncoder().encode(password);
   const keyMaterial=await crypto.subtle.importKey('raw',enc,'PBKDF2',false,['deriveKey']);
-  return crypto.subtle.deriveKey({name:'PBKDF2',salt:getSalt(),iterations:100000,hash:'SHA-256'},keyMaterial,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt:APP_SALT,iterations:100000,hash:'SHA-256'},keyMaterial,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
 }
 async function encrypt(data){
   if(!_cryptoKey)return data; // fallback: no encryption if no key
@@ -78,18 +80,76 @@ async function setVerification(){
   localStorage.setItem(VERIFY_KEY,JSON.stringify({d:btoa(String.fromCharCode(...new Uint8Array(encrypted))),v:btoa(String.fromCharCode(...iv))}));
 }
 async function checkPassword(password){
-  _cryptoKey=await deriveKey(password);
   const stored=localStorage.getItem(VERIFY_KEY);
-  if(!stored){await setVerification();return true} // first time = set password
-  try{
-    const{d,v}=JSON.parse(stored);
-    const iv=Uint8Array.from(atob(v),c=>c.charCodeAt(0));
-    const data=Uint8Array.from(atob(d),c=>c.charCodeAt(0));
-    const decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},_cryptoKey,data);
-    const text=new TextDecoder().decode(decrypted);
-    if(text==='timeflow_ok')return true;
-    _cryptoKey=null;return false;
-  }catch(e){_cryptoKey=null;return false}
+  if(!stored){
+    // First time - set password with fixed salt
+    _cryptoKey=await deriveKey(password);
+    await setVerification();
+    return true;
+  }
+  // Try fixed salt first, then old random salt
+  const saltsToTry=[APP_SALT];
+  const oldSalt=localStorage.getItem('tf_salt');
+  if(oldSalt)saltsToTry.push(Uint8Array.from(atob(oldSalt),c=>c.charCodeAt(0)));
+
+  const{d,v}=JSON.parse(stored);
+  const iv=Uint8Array.from(atob(v),c=>c.charCodeAt(0));
+  const data=Uint8Array.from(atob(d),c=>c.charCodeAt(0));
+
+  let usedOldSalt=false;
+  for(const salt of saltsToTry){
+    try{
+      const enc=new TextEncoder().encode(password);
+      const km=await crypto.subtle.importKey('raw',enc,'PBKDF2',false,['deriveKey']);
+      const key=await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:100000,hash:'SHA-256'},km,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+      const decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,data);
+      const text=new TextDecoder().decode(decrypted);
+      if(text==='timeflow_ok'){
+        if(salt!==APP_SALT){
+          // Migrate: re-encrypt all data from old key to new key
+          usedOldSalt=true;
+          const oldKey=key;
+          const newKey=await deriveKey(password);
+          _cryptoKey=oldKey; // temporarily use old key to read
+          await migrateData(oldKey,newKey);
+          _cryptoKey=newKey;
+          await setVerification();
+          await createBackup(); // re-encrypt localStorage backup with new key
+        }else{
+          _cryptoKey=await deriveKey(password);
+        }
+        return true;
+      }
+    }catch(e){continue}
+  }
+  _cryptoKey=null;return false;
+}
+
+async function migrateData(oldKey,newKey){
+  const db=await openDB();
+  for(const store of STORES){
+    const raw=await new Promise((res,rej)=>{const tx=db.transaction(store,'readonly');const r=tx.objectStore(store).getAll();r.onsuccess=()=>res(r.result);r.onerror=e=>rej(e)});
+    if(!raw.length)continue;
+    // Decrypt with old key, re-encrypt with new key
+    const tx=db.transaction(store,'readwrite');const s=tx.objectStore(store);
+    for(const record of raw){
+      if(!record._enc)continue; // unencrypted record
+      try{
+        // Decrypt with old key
+        const iv=Uint8Array.from(atob(record._iv),c=>c.charCodeAt(0));
+        const data=Uint8Array.from(atob(record._enc),c=>c.charCodeAt(0));
+        const decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},oldKey,data);
+        const obj=JSON.parse(new TextDecoder().decode(decrypted));
+        // Re-encrypt with new key
+        const newIv=crypto.getRandomValues(new Uint8Array(12));
+        const encoded=new TextEncoder().encode(JSON.stringify(obj));
+        const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv:newIv},newKey,encoded);
+        s.put({id:record.id,_enc:btoa(String.fromCharCode(...new Uint8Array(encrypted))),_iv:btoa(String.fromCharCode(...newIv))});
+      }catch(e){console.warn('Migration skip record',record.id,e)}
+    }
+    await new Promise(r=>{tx.oncomplete=r});
+  }
+  console.log('Data migrated to new salt');
 }
 function isFirstTime(){return !localStorage.getItem(VERIFY_KEY)}
 function isUnlocked(){return _cryptoKey!==null}
@@ -150,10 +210,22 @@ async function restoreFromBackup(){
   const raw=localStorage.getItem(BACKUP_KEY);
   if(!raw)return false;
   try{
-    const{d,v}=JSON.parse(raw);
-    const iv=Uint8Array.from(atob(v),c=>c.charCodeAt(0));
-    const enc=Uint8Array.from(atob(d),c=>c.charCodeAt(0));
-    const decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},_cryptoKey,enc);
+    const parsed=JSON.parse(raw);
+    const iv=Uint8Array.from(atob(parsed.v),c=>c.charCodeAt(0));
+    const encData=Uint8Array.from(atob(parsed.d),c=>c.charCodeAt(0));
+    // Try current key first, then old salt key
+    let decrypted=null;
+    const keysToTry=[_cryptoKey];
+    const oldSalt=localStorage.getItem('tf_salt');
+    if(oldSalt){
+      try{
+        const enc=new TextEncoder().encode(''); // we don't have password here
+        // Can't derive old key without password - just try current key
+      }catch(e){}
+    }
+    try{
+      decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},_cryptoKey,encData);
+    }catch(e){console.error('Backup decrypt failed:',e);return false}
     const data=JSON.parse(new TextDecoder().decode(decrypted));
     const db=await openDB();
     for(const store of Object.keys(data)){
@@ -166,6 +238,8 @@ async function restoreFromBackup(){
       }
       await new Promise(r=>{tx.oncomplete=r});
     }
+    // Re-create backup with current key
+    await createBackup();
     console.log('Restored from backup');
     return true;
   }catch(e){console.error('Restore error:',e);return false}
@@ -1943,9 +2017,12 @@ function EntryModal({open,onClose,onSave,categories,labels,edit}){
 /* ============ LOCK SCREEN ============ */
 function LockScreen({onUnlock}){
   const[pw,setPW]=useState("");const[pw2,setPW2]=useState("");const[err,setErr]=useState("");const[loading,setL]=useState(false);
+  const[status,setStatus]=useState("");
   const first=isFirstTime();
+  const bkInfo=getBackupInfo();
+
   const submit=async()=>{
-    setErr("");setL(true);
+    setErr("");setL(true);setStatus("");
     if(first){
       if(pw.length<4){setErr("Mindestens 4 Zeichen");setL(false);return}
       if(pw!==pw2){setErr("Passwörter stimmen nicht überein");setL(false);return}
@@ -1953,14 +2030,84 @@ function LockScreen({onUnlock}){
       if(ok)onUnlock();else{setErr("Fehler");setL(false)}
     }else{
       const ok=await checkPassword(pw);
-      if(ok)onUnlock();else{setErr("Falsches Passwort");setL(false);setPW("")}
+      if(!ok){setErr("Falsches Passwort");setL(false);setPW("");return}
+      // Password correct - check if DB has data
+      await openDB();
+      const has=await hasData();
+      if(!has&&bkInfo){
+        setStatus("Daten wiederherstellen...");
+        await restoreFromBackup();
+        setStatus("");
+      }
+      onUnlock();
     }
   };
+
+  // Restore from .tfb file - tries multiple salts for compatibility
+  const restoreFile=async()=>{
+    if(!pw||pw.length<4){setErr("Passwort eingeben (min. 4 Zeichen)");return}
+    setErr("");
+    const input=document.createElement('input');input.type='file';input.accept='.tfb,.json';
+    input.onchange=async e=>{
+      const file=e.target.files[0];if(!file){return}
+      try{
+        setL(true);setStatus("Entschlüsseln...");
+        const text=await file.text();
+        const parsed=JSON.parse(text);
+        let data;
+        if(parsed.d&&parsed.v){
+          // Encrypted .tfb - try different salts
+          const iv=Uint8Array.from(atob(parsed.v),c=>c.charCodeAt(0));
+          const encData=Uint8Array.from(atob(parsed.d),c=>c.charCodeAt(0));
+          // Build list of salts to try
+          const saltsToTry=[];
+          if(parsed.s)saltsToTry.push(Uint8Array.from(atob(parsed.s),c=>c.charCodeAt(0))); // embedded salt
+          saltsToTry.push(APP_SALT); // fixed app salt
+          const oldSalt=localStorage.getItem('tf_salt'); // old random salt
+          if(oldSalt)saltsToTry.push(Uint8Array.from(atob(oldSalt),c=>c.charCodeAt(0)));
+          let decrypted=null;
+          for(const salt of saltsToTry){
+            try{
+              const enc2=new TextEncoder().encode(pw);
+              const km=await crypto.subtle.importKey('raw',enc2,'PBKDF2',false,['deriveKey']);
+              const key=await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:100000,hash:'SHA-256'},km,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+              decrypted=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,encData);
+              break; // success
+            }catch(ex){continue}
+          }
+          if(!decrypted)throw new Error('decrypt failed');
+          data=JSON.parse(new TextDecoder().decode(decrypted));
+        }else{
+          data=parsed; // unencrypted legacy JSON
+        }
+        // Set crypto key with fixed salt going forward
+        _cryptoKey=await deriveKey(pw);
+        await setVerification();
+        setStatus("Wiederherstellen...");
+        await openDB();
+        for(const store of Object.keys(data)){
+          const db=await openDB();
+          if(!db.objectStoreNames.contains(store))continue;
+          const tx=db.transaction(store,'readwrite');const s=tx.objectStore(store);
+          await new Promise(r=>{s.clear().onsuccess=r});
+          for(const item of data[store]){
+            const enc2=await encrypt(item);enc2.id=item.id;
+            try{s.put(enc2)}catch(ex){}
+          }
+          await new Promise(r=>{tx.oncomplete=r});
+        }
+        await createBackup();
+        setStatus("");onUnlock();
+      }catch(err){setErr("Entschlüsselung fehlgeschlagen – falsches Passwort oder beschädigte Datei");setStatus("");setL(false)}
+    };
+    input.click();
+  };
+
   return<div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.bg,padding:24}}>
     <div style={{...S.card,maxWidth:360,width:"100%",textAlign:"center"}}>
       <div style={{fontSize:48,marginBottom:16}}>{"\u{1F512}"}</div>
       <h2 style={{fontSize:20,fontWeight:700,marginBottom:4}}>TimeFlow</h2>
-      <div style={{fontSize:13,color:T.textSec,marginBottom:24}}>{first?"Setze ein Passwort für deine Daten":"Passwort eingeben"}</div>
+      <div style={{fontSize:13,color:T.textSec,marginBottom:20}}>{first?"Setze ein Passwort für deine Daten":"Passwort eingeben"}</div>
       <div style={{marginBottom:12}}>
         <input type="password" style={{...S.inp,textAlign:"center",fontSize:20,letterSpacing:4}} placeholder={first?"Neues Passwort":"Passwort"} value={pw} onChange={e=>setPW(e.target.value)} onKeyDown={e=>e.key==='Enter'&&(!first?submit():null)} autoFocus/>
       </div>
@@ -1968,9 +2115,21 @@ function LockScreen({onUnlock}){
         <input type="password" style={{...S.inp,textAlign:"center",fontSize:20,letterSpacing:4}} placeholder="Wiederholen" value={pw2} onChange={e=>setPW2(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()}/>
       </div>}
       {err&&<div style={{color:T.accent,fontSize:13,marginBottom:12}}>{err}</div>}
+      {status&&<div style={{color:T.blue,fontSize:13,marginBottom:12}}>{status}</div>}
       <button onClick={submit} disabled={loading} style={{...S.btn(T.green),width:"100%",opacity:loading?.5:1}}>{loading?"...":first?"Passwort setzen":"\u{1F513} Entsperren"}</button>
-      {first&&<div style={{fontSize:11,color:T.textMuted,marginTop:16}}>
-        {"\u{1F512}"} Alle Daten werden mit AES-256 verschlüsselt.<br/>Dein Passwort wird nirgendwo gespeichert.
+
+      {!first&&bkInfo&&<div style={{marginTop:16,padding:12,background:T.bg,borderRadius:10,fontSize:11,color:T.green}}>
+        {"\u2705"} Lokales Backup vorhanden<br/>
+        {new Date(bkInfo.timestamp).toLocaleString('de-CH',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})} · {bkInfo.records} Einträge<br/>
+        <span style={{color:T.textMuted}}>Wird automatisch wiederhergestellt</span>
+      </div>}
+
+      <button onClick={restoreFile} style={{...S.btnO(T.textMuted),width:"100%",marginTop:first?16:10,fontSize:12,padding:"8px 14px"}}>
+        {"\u{1F4E5}"} {first?"Anderes Gerät? Backup-Datei (.tfb) laden":"Aus Backup-Datei (.tfb) wiederherstellen"}
+      </button>
+
+      {first&&<div style={{fontSize:11,color:T.textMuted,marginTop:12}}>
+        {"\u{1F512}"} AES-256 Verschlüsselung · Dein Passwort wird nirgendwo gespeichert
       </div>}
     </div>
   </div>
@@ -1990,20 +2149,9 @@ function App(){
 
   const loadData=async()=>{try{const[c,g,e,s,lb]=await Promise.all([api.get('categories'),api.get('goals'),api.get('entries'),api.get('stats'),api.get('labels')]);setCats(Array.isArray(c)?c:[]);setGoals(Array.isArray(g)?g:[]);setEntries(Array.isArray(e)?e:[]);setCS(s.catStats||[]);setWD(s.weekData||[]);setLabels(Array.isArray(lb)?lb:[]);setLoaded(true)}catch(e){console.error(e);setLoaded(true)}};
 
-  // On unlock: open DB, check if data exists, restore from backup if needed, then load
+  // On unlock: load data (restore already happened in LockScreen if needed)
   useEffect(()=>{if(!unlocked)return;
-    (async()=>{
-      await openDB();
-      const has=await hasData();
-      if(!has){
-        const bi=getBackupInfo();
-        if(bi){
-          console.log('No data in DB, restoring backup from',bi.timestamp,'with',bi.records,'records');
-          await restoreFromBackup();
-        }
-      }
-      loadData();
-    })();
+    openDB().then(()=>loadData());
   },[unlocked]);
 
   // Auto-backup when app goes to background or closes
@@ -2029,16 +2177,20 @@ function App(){
   const saveEntry=async d=>{if(d.id)await api.put('entries/'+d.id,d);else await api.post('entries',d);setSEM(false);setEE(null);loadData()};
   const delEntry=async id=>{await api.del('entries/'+id);loadData()};
 
-  // Export all data as encrypted file
+  // Export all data as encrypted file (includes salt for portability)
   const exportData=async()=>{
     const data={};
     for(const store of STORES){data[store]=await dbAll(store)}
-    // Encrypt the whole backup with user's key
     const json=JSON.stringify(data);
     const iv=crypto.getRandomValues(new Uint8Array(12));
     const encoded=new TextEncoder().encode(json);
     const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv},_cryptoKey,encoded);
-    const payload=JSON.stringify({d:btoa(String.fromCharCode(...new Uint8Array(encrypted))),v:btoa(String.fromCharCode(...iv)),t:new Date().toISOString()});
+    const payload=JSON.stringify({
+      d:btoa(String.fromCharCode(...new Uint8Array(encrypted))),
+      v:btoa(String.fromCharCode(...iv)),
+      s:btoa(String.fromCharCode(...APP_SALT)),
+      t:new Date().toISOString()
+    });
     const blob=new Blob([payload],{type:'application/json'});
     const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='timeflow-backup-'+new Date().toISOString().slice(0,10)+'.tfb';a.click();URL.revokeObjectURL(url);
     await createBackup();
